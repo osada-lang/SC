@@ -1,0 +1,22 @@
+# AI Models (Over 100MB)
+models/*.onnx
+models/*.task
+*.onnx
+
+# App bundles
+*.app
+ChameleonAI.app/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+.DS_Store
+
+# Server targets uploaded by users (keep default)
+server/targets/*
+!server/targets/default.jpg

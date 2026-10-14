@@ -1,0 +1,12 @@
+fastapi>=0.100.0
+uvicorn[standard]>=0.22.0
+aiortc>=1.6.0
+opencv-python>=4.8.0
+numpy>=1.23.0,<2.0.0
+insightface>=0.7.3
+onnxruntime>=1.15.0
+python-multipart>=0.0.6
+websockets>=11.0
+av>=10.0.0
+aiofiles>=23.1.0
+pillow>=9.5.0
