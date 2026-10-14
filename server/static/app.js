@@ -1,10 +1,13 @@
 let pc = null;
 let localStream = null;
 let statsWs = null;
+let streamWs = null;
+let isStreaming = false;
 let isShowingLocal = false;
 
 // DOM要素
 const remoteVideo = document.getElementById('remoteVideo');
+const remoteCanvas = document.getElementById('remoteCanvas');
 const localVideo = document.getElementById('localVideo');
 const videoPlaceholder = document.getElementById('videoPlaceholder');
 const viewModeBadge = document.getElementById('viewModeBadge');
@@ -12,6 +15,10 @@ const btnStart = document.getElementById('btnStart');
 const btnStop = document.getElementById('btnStop');
 const btnToggleSource = document.getElementById('btnToggleSource');
 const cameraSelect = document.getElementById('cameraSelect');
+
+const canvasCtx = remoteCanvas ? remoteCanvas.getContext('2d') : null;
+const captureCanvas = document.createElement('canvas');
+const captureCtx = captureCanvas.getContext('2d');
 
 const connectionStatus = document.getElementById('connectionStatus');
 const statLatency = document.getElementById('statLatency');
@@ -242,7 +249,7 @@ async function getCameraStream(deviceId) {
   throw lastError || new Error('利用可能なカメラが見つかりませんでした');
 }
 
-// --- WebRTC ストリーミング ---
+// --- リアルタイム・ストリーミング (WebSocket & WebRTC ハイブリッド) ---
 async function startStream() {
   btnStart.disabled = true;
   btnStart.textContent = '接続中...';
@@ -254,56 +261,21 @@ async function startStream() {
     // 1. 段階的フォールバックでカメラ起動
     localStream = await getCameraStream(selectedDeviceId);
     localVideo.srcObject = localStream;
-
-    // カメラ起動後にデバイス名（ラベル）を再取得して更新
     await populateCameraDevices();
 
-    // 2. WebRTC PeerConnection 初期化
-    const config = {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    };
-    pc = new RTCPeerConnection(config);
-
-    // 受信トラック（AI処理済み映像）のハンドリング
-    pc.ontrack = (event) => {
-      console.log('[WebRTC] サーバーから処理済みトラックを受信:', event.track.kind);
-      if (event.track.kind === 'video') {
-        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        remoteVideo.srcObject = stream;
-        remoteVideo.play().catch(e => console.warn('Autoplay play error:', e));
-        videoPlaceholder.classList.add('hidden');
-      }
-    };
-
-    // カメラトラックの追加
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-    // Offer作成と送信
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const response = await fetch('/offer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sdp: pc.localDescription.sdp,
-        type: pc.localDescription.type
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`サーバーエラー: ${response.status}`);
-    }
-
-    const answer = await response.json();
-    await pc.setRemoteDescription(new RTCSessionDescription(answer));
-
-    setConnectionStatus('connected', 'オンライン (WebRTC)');
+    isStreaming = true;
     btnStart.textContent = '配信中';
     btnStop.disabled = false;
+    setConnectionStatus('connected', 'オンライン (接続完了)');
 
-    // WebSocket統計接続開始
+    // 2. WebSocket 高速ストリームの開始 (RunPodプロキシ・ファイアウォール完全回避)
+    startWebSocketStream();
+
+    // 3. 統計WebSocket開始
     connectStatsWebSocket();
+
+    // 4. WebRTC接続も並行試行
+    tryStartWebRTC();
   } catch (err) {
     console.error('接続失敗:', err);
     alert(`接続に失敗しました: ${err.message}\nブラウザのカメラ使用許可設定を確認してください。`);
@@ -311,7 +283,102 @@ async function startStream() {
   }
 }
 
+function startWebSocketStream() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  streamWs = new WebSocket(`${protocol}//${window.location.host}/ws/stream`);
+  streamWs.binaryType = 'arraybuffer';
+
+  let waitingForResponse = false;
+
+  streamWs.onopen = () => {
+    console.log('[WebSocket Stream] 接続確立 - 映像送信ループ開始');
+    videoPlaceholder.classList.add('hidden');
+    sendNextFrame();
+  };
+
+  streamWs.onmessage = async (event) => {
+    waitingForResponse = false;
+    if (!isStreaming) return;
+
+    try {
+      const blob = new Blob([event.data], { type: 'image/jpeg' });
+      const imgBitmap = await createImageBitmap(blob);
+      
+      if (remoteCanvas.width !== imgBitmap.width || remoteCanvas.height !== imgBitmap.height) {
+        remoteCanvas.width = imgBitmap.width;
+        remoteCanvas.height = imgBitmap.height;
+      }
+      canvasCtx.drawImage(imgBitmap, 0, 0);
+      videoPlaceholder.classList.add('hidden');
+    } catch (e) {
+      console.warn('フレーム描画エラー:', e);
+    }
+
+    // 次のフレームを送信
+    if (isStreaming) {
+      requestAnimationFrame(sendNextFrame);
+    }
+  };
+
+  streamWs.onerror = (e) => console.warn('[WebSocket Stream] エラー:', e);
+  streamWs.onclose = () => console.log('[WebSocket Stream] 切断');
+
+  function sendNextFrame() {
+    if (!isStreaming || !localVideo.videoWidth || waitingForResponse) return;
+
+    captureCanvas.width = localVideo.videoWidth;
+    captureCanvas.height = localVideo.videoHeight;
+    captureCtx.drawImage(localVideo, 0, 0);
+
+    waitingForResponse = true;
+    captureCanvas.toBlob((blob) => {
+      if (blob && streamWs && streamWs.readyState === WebSocket.OPEN) {
+        blob.arrayBuffer().then(buf => streamWs.send(buf));
+      } else {
+        waitingForResponse = false;
+      }
+    }, 'image/jpeg', 0.80);
+  }
+}
+
+async function tryStartWebRTC() {
+  try {
+    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    pc = new RTCPeerConnection(config);
+
+    pc.ontrack = (event) => {
+      if (event.track.kind === 'video') {
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        remoteVideo.srcObject = stream;
+        remoteVideo.play().catch(() => {});
+      }
+    };
+
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    const response = await fetch('/offer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
+    });
+
+    if (response.ok) {
+      const answer = await response.json();
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    }
+  } catch (e) {
+    console.log('[WebRTC] オプション接続スキップ (WebSocketで継続):', e.message);
+  }
+}
+
 function stopStream() {
+  isStreaming = false;
+  if (streamWs) {
+    streamWs.close();
+    streamWs = null;
+  }
   if (pc) {
     pc.close();
     pc = null;
@@ -327,6 +394,9 @@ function stopStream() {
 
   remoteVideo.srcObject = null;
   localVideo.srcObject = null;
+  if (canvasCtx) {
+    canvasCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
+  }
   videoPlaceholder.classList.remove('hidden');
 
   btnStart.disabled = false;
@@ -372,11 +442,13 @@ btnToggleSource.addEventListener('click', () => {
   if (isShowingLocal) {
     localVideo.classList.remove('hidden');
     remoteVideo.classList.add('hidden');
+    if (remoteCanvas) remoteCanvas.classList.add('hidden');
     viewModeBadge.textContent = 'カメラ元映像 (オリジナル)';
     btnToggleSource.textContent = 'AI変換後に戻す';
   } else {
     localVideo.classList.add('hidden');
     remoteVideo.classList.remove('hidden');
+    if (remoteCanvas) remoteCanvas.classList.remove('hidden');
     viewModeBadge.textContent = 'AI 変換後プレビュー';
     btnToggleSource.textContent = '元映像と比較';
   }

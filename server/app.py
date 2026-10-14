@@ -226,6 +226,47 @@ async def api_upload_target(file: UploadFile = File(...), name: Optional[str] = 
         "url": f"/targets/{target_filename}"
     })
 
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket):
+    """
+    RunPodプロキシ等、UDP/WebRTCが遮断される環境向けの高速WebSocketバイナリストリーミング
+    """
+    global latest_meta
+    await websocket.accept()
+    loop = asyncio.get_event_loop()
+    print("[WebSocket Stream] クライアント接続確立")
+
+    try:
+        while True:
+            # 1. クライアントからJPEGバイナリを受信
+            data = await websocket.receive_bytes()
+            if not data:
+                continue
+
+            # 2. デコード
+            nparr = np.frombuffer(data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+
+            # 3. 別スレッドで高速AI処理
+            processed_img, meta = await loop.run_in_executor(
+                None,
+                pipeline.process_frame,
+                img
+            )
+            latest_meta = meta
+
+            # 4. 高速JPEGエンコード & 返送
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 82]
+            _, enc_img = cv2.imencode('.jpg', processed_img, encode_param)
+            
+            await websocket.send_bytes(enc_img.tobytes())
+    except WebSocketDisconnect:
+        print("[WebSocket Stream] クライアント切断")
+    except Exception as e:
+        print(f"[WebSocket Stream] エラー: {e}")
+
 @app.websocket("/ws/stats")
 async def websocket_stats(websocket: WebSocket):
     """リアルタイムで統計情報(FPS/Latency)をWeb UIにブロードキャスト"""
