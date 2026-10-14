@@ -1,13 +1,13 @@
 import os
 import sys
 
-# --- Python 3.12 / 最新ライブラリ互換性パッチ ---
+# --- Python 3.12 / skimage 互換性完全パッチ ---
 try:
     import skimage.transform
-    if not hasattr(skimage.transform, 'SimilarityTransform'):
-        from skimage.transform import EuclideanTransform
-        skimage.transform.SimilarityTransform = EuclideanTransform
-except Exception:
+    from skimage.transform._geometric import SimilarityTransform
+    skimage.transform.SimilarityTransform = SimilarityTransform
+    setattr(sys.modules['skimage.transform'], 'SimilarityTransform', SimilarityTransform)
+except Exception as e:
     pass
 
 import json
