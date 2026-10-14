@@ -1,5 +1,15 @@
 import os
 import sys
+
+# --- Python 3.12 / 最新ライブラリ互換性パッチ ---
+try:
+    import skimage.transform
+    if not hasattr(skimage.transform, 'SimilarityTransform'):
+        from skimage.transform import EuclideanTransform
+        skimage.transform.SimilarityTransform = EuclideanTransform
+except Exception:
+    pass
+
 import time
 import copy
 import cv2
@@ -51,9 +61,13 @@ class AIFaceSwapPipeline:
         parser_path = os.path.join(models_dir, "face_parser.onnx")
         self.parser_session = None
         if os.path.exists(parser_path):
-            print("[AI Pipeline] FaceParser を初期化中...")
-            self.parser_session = ort.InferenceSession(parser_path, providers=self.providers, sess_options=sess_opts)
-            self.parser_input_name = self.parser_session.get_inputs()[0].name
+            try:
+                print("[AI Pipeline] FaceParser を初期化中...")
+                self.parser_session = ort.InferenceSession(parser_path, providers=self.providers, sess_options=sess_opts)
+                self.parser_input_name = self.parser_session.get_inputs()[0].name
+            except Exception as e:
+                print(f"[AI Pipeline] FaceParser ロード警告 (スキップします): {e}")
+                self.parser_session = None
 
         # 4. 超解像・高画質化モデル (GFPGAN)
         gfpgan_path = os.path.join(models_dir, "GFPGANv1.4.onnx")

@@ -1,5 +1,15 @@
 import os
 import sys
+
+# --- Python 3.12 / 最新ライブラリ互換性パッチ ---
+try:
+    import skimage.transform
+    if not hasattr(skimage.transform, 'SimilarityTransform'):
+        from skimage.transform import EuclideanTransform
+        skimage.transform.SimilarityTransform = EuclideanTransform
+except Exception:
+    pass
+
 import json
 import asyncio
 import uuid
