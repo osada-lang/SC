@@ -1,14 +1,13 @@
 import os
 import sys
 import argparse
-import asyncio
-import cv2
-import aiohttp
-import threading
 import time
+import threading
+import queue
+import cv2
 import numpy as np
-from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
-import av
+import requests
+import websocket
 
 # 仮想カメラ対応 (pyvirtualcam がインストールされている場合)
 try:
@@ -19,180 +18,161 @@ except ImportError:
 
 is_running = True
 display_frame = None
+latest_fps = 0.0
+latest_latency = 0.0
+show_original = False
 
-class CameraVideoTrack(VideoStreamTrack):
+def capture_and_stream_thread(server_url: str, camera_index: int):
     """
-    ローカルWebカメラから映像を取得しWebRTCでクラウドへ送信するトラック
+    バックグラウンドスレッドでカメラキャプチャ & クラウドサーバーへ高速ストリーミング
     """
-    def __init__(self, camera_index=0, width=1280, height=720):
-        super().__init__()
-        print(f"[クライアント] Webカメラ (Index: {camera_index}) を起動中...")
-        self.cap = cv2.VideoCapture(camera_index)
-        
-        if not self.cap.isOpened():
-            for i in range(1, 5):
-                self.cap = cv2.VideoCapture(i)
-                if self.cap.isOpened():
-                    print(f"[クライアント] カメラインデックス {i} で起動しました。")
-                    break
-            else:
-                print("エラー: 有効なカメラが見つかりませんでした。")
-                sys.exit(1)
-
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-
-    async def recv(self):
-        pts, time_base = await self.next_timestamp()
-        ret, frame = self.cap.read()
-        if not ret:
-            frame = np.zeros((720, 1280, 3), dtype=np.uint8)
-
-        new_frame = av.VideoFrame.from_ndarray(frame, format="bgr24")
-        new_frame.pts = pts
-        new_frame.time_base = time_base
-        return new_frame
-
-    def release(self):
-        self.cap.release()
-
-async def run_webrtc_client(server_url: str):
-    global is_running, display_frame
-    print(f"[クライアント] サーバーへ接続準備中: {server_url}")
-
-    config = RTCConfiguration(
-        iceServers=[RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
-    )
-    pc = RTCPeerConnection(configuration=config)
-    camera_track = CameraVideoTrack()
-    pc.addTrack(camera_track)
-
-    @pc.on("track")
-    def on_track(track):
-        print(f"[クライアント] サーバーから処理済みビデオトラックを受信: {track.kind}")
-        if track.kind == "video":
-            asyncio.ensure_future(receive_video_loop(track))
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange():
-        print(f"[クライアント] WebRTC接続状態: {pc.connectionState}")
-        if pc.connectionState in ["failed", "closed"]:
-            global is_running
+    global is_running, display_frame, latest_fps, latest_latency, show_original
+    
+    print(f"[クライアント] カメラ (Index: {camera_index}) を起動中...")
+    cap = cv2.VideoCapture(camera_index)
+    if not cap.isOpened():
+        for i in range(1, 5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                print(f"[クライアント] カメラインデックス {i} で起動しました。")
+                break
+        else:
+            print("エラー: カメラを起動できませんでした。")
             is_running = False
-
-    # SDP Offer 作成
-    offer = await pc.createOffer()
-    await pc.setLocalDescription(offer)
-
-    # サーバーへの送信
-    offer_endpoint = f"{server_url.rstrip('/')}/offer"
-    print(f"[クライアント] シグナリング中: {offer_endpoint}")
-
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(
-                offer_endpoint,
-                json={"sdp": pc.localDescription.sdp, "type": pc.localDescription.type},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status != 200:
-                    print(f"エラー: サーバー応答ステータス {response.status}")
-                    camera_track.release()
-                    await pc.close()
-                    return
-                answer_data = await response.json()
-        except Exception as e:
-            print(f"エラー: サーバーへの接続に失敗しました: {e}")
-            camera_track.release()
-            await pc.close()
             return
 
-    answer = RTCSessionDescription(sdp=answer_data["sdp"], type=answer_data["type"])
-    await pc.setRemoteDescription(answer)
-    print("[クライアント] 双方向 WebRTC 接続が確立しました。ストリーミング開始！")
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # WebSocket URL の構築
+    ws_url = server_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/") + "/ws/stream"
+    http_fallback_url = server_url.rstrip("/") + "/api/process_frame"
+
+    print(f"[クライアント] ストリーミング接続先: {ws_url}")
+
+    frame_count = 0
+    last_fps_time = time.time()
 
     while is_running:
-        await asyncio.sleep(0.5)
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.01)
+            continue
 
-    camera_track.release()
-    await pc.close()
+        if show_original:
+            display_frame = frame
+            time.sleep(0.03)
+            continue
 
-async def receive_video_loop(track):
-    global is_running, display_frame
-    try:
-        while is_running:
-            frame = await track.recv()
-            display_frame = frame.to_ndarray(format="bgr24")
-    except Exception as e:
-        print(f"[クライアント] 受信ループ終了: {e}")
-    finally:
-        is_running = False
+        # 1280x720 ➔ 854x480 送信用にスケーリング
+        h, w = frame.shape[:2]
+        target_w = 854
+        target_h = int(target_w * (h / w))
+        small_frame = cv2.resize(frame, (target_w, target_h))
 
-def start_webrtc_thread(server_url: str):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(run_webrtc_client(server_url))
-    except Exception as e:
-        print(f"[クライアント] エラー: {e}")
-    finally:
-        loop.close()
+        # JPEG圧縮
+        _, enc_jpg = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        jpg_bytes = enc_jpg.tobytes()
+
+        start_t = time.time()
+
+        try:
+            # HTTP POST による確実な高速フレーム処理
+            res = requests.post(
+                http_fallback_url,
+                files={"file": ("frame.jpg", jpg_bytes, "image/jpeg")},
+                timeout=1.0
+            )
+            if res.status_code == 200:
+                resp_arr = np.frombuffer(res.content, np.uint8)
+                proc_img = cv2.imdecode(resp_arr, cv2.IMREAD_COLOR)
+                if proc_img is not None:
+                    display_frame = proc_img
+                    latest_latency = (time.time() - start_t) * 1000
+
+                    frame_count += 1
+                    now = time.time()
+                    if now - last_fps_time >= 1.0:
+                        latest_fps = frame_count / (now - last_fps_time)
+                        frame_count = 0
+                        last_fps_time = now
+        except Exception:
+            pass
+
+    cap.release()
+    print("[ストリームスレッド] 終了しました。")
+
 
 def main():
-    global is_running, display_frame
-    parser = argparse.ArgumentParser(description="LiveChat 仮想カメラストリーミングクライアント")
-    parser.add_argument("--server", default="http://127.0.0.1:8080", help="AIサーバーのURL (例: https://xxxx.proxy.runpod.net または http://127.0.0.1:8080)")
-    parser.add_argument("--vcam", action="store_true", help="OBS / Stripchat配信用仮想Webカメラ出力を有効化")
+    global is_running, display_frame, latest_fps, latest_latency, show_original
+
+    parser = argparse.ArgumentParser(description="LiveChat 専用クライアント (Native Window)")
+    parser.add_argument("--server", default="http://127.0.0.1:8080", help="サーバーURL (例: https://xxxx.proxy.runpod.net)")
+    parser.add_argument("--camera", type=int, default=0, help="カメラインデックス (0, 1, 2...)")
+    parser.add_argument("--vcam", action="store_true", help="OBS / Stripchat用 仮想カメラ出力")
     args = parser.parse_args()
 
     print("==================================================")
-    print("  LiveChat AI 仮想カメラストリーミングクライアント")
+    print("  LiveChat AI Studio [Native Window Client]")
     print(f"  接続先: {args.server}")
-    print(f"  仮想カメラ: {'有効' if args.vcam else '無効 (GUIプレビューのみ)'}")
-    print("  終了方法: プレビューウィンドウで 'q' キーを押す")
+    print("  操作方法:")
+    print("    - [q] キー: 終了")
+    print("    - [s] キー: 元映像 / AI変換後 切り替え")
     print("==================================================")
 
-    # WebRTC通信スレッド開始
-    webrtc_thread = threading.Thread(target=start_webrtc_thread, args=(args.server,), daemon=True)
-    webrtc_thread.start()
+    # 通信スレッド起動
+    stream_thread = threading.Thread(
+        target=capture_and_stream_thread,
+        args=(args.server, args.camera),
+        daemon=True
+    )
+    stream_thread.start()
 
-    # 仮想カメラ出力コンテキストの準備
+    # 仮想カメラ初期化
     vcam = None
-    if args.vcam:
-        if HAS_VIRTUAL_CAM:
-            try:
-                vcam = pyvirtualcam.Camera(width=1280, height=720, fps=30, fmt=pyvirtualcam.PixelFormat.BGR)
-                print(f"[仮想カメラ] デバイス起動成功: {vcam.device}")
-            except Exception as e:
-                print(f"[仮想カメラ警告] 仮想カメラ起動失敗: {e} (プレビューのみで継続します)")
-        else:
-            print("[仮想カメラ警告] pyvirtualcam が未インストールです。(pip install pyvirtualcam)")
+    if args.vcam and HAS_VIRTUAL_CAM:
+        try:
+            vcam = pyvirtualcam.Camera(width=1280, height=720, fps=30, fmt=pyvirtualcam.PixelFormat.BGR)
+            print(f"[仮想カメラ] 有効化完了: {vcam.device}")
+        except Exception as e:
+            print(f"[仮想カメラ警告] {e}")
+
+    window_name = "LiveChat AI Studio - Dedicated Preview [Press Q to quit]"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(window_name, 1280, 720)
 
     try:
         while is_running:
             if display_frame is not None:
-                # 仮想カメラへフレーム送信
+                view = display_frame.copy()
+
+                # ステータス情報描画
+                status_text = f"Latency: {latest_latency:.0f}ms | FPS: {latest_fps:.1f} | Mode: {'Original' if show_original else 'AI Face Swap'}"
+                cv2.putText(view, status_text, (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                cv2.imshow(window_name, view)
+
                 if vcam is not None:
-                    # 720pにリサイズして送信
-                    frame_vcam = cv2.resize(display_frame, (1280, 720))
-                    vcam.send(frame_vcam)
+                    out_frame = cv2.resize(view, (1280, 720))
+                    vcam.send(out_frame)
                     vcam.sleep_until_next_frame()
 
-                # ローカルプレビュー表示
-                cv2.imshow("LiveChat AI Stream Preview (Press Q to quit)", display_frame)
-
-            if cv2.waitKey(10) & 0xFF == ord('q'):
+            key = cv2.waitKey(10) & 0xFF
+            if key == ord('q'):
                 is_running = False
                 break
+            elif key == ord('s'):
+                show_original = not show_original
 
-            time.sleep(0.01)
+            time.sleep(0.005)
     except KeyboardInterrupt:
         is_running = False
     finally:
+        is_running = False
         if vcam is not None:
             vcam.close()
         cv2.destroyAllWindows()
-        print("[メインスレッド] 正常終了しました。")
+        print("[メイン] 正常終了しました。")
 
 if __name__ == "__main__":
     main()
