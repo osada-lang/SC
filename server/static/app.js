@@ -261,6 +261,7 @@ async function startStream() {
     // 1. 段階的フォールバックでカメラ起動
     localStream = await getCameraStream(selectedDeviceId);
     localVideo.srcObject = localStream;
+    await localVideo.play().catch(e => console.warn('localVideo play error:', e));
     await populateCameraDevices();
 
     isStreaming = true;
@@ -268,7 +269,7 @@ async function startStream() {
     btnStop.disabled = false;
     setConnectionStatus('connected', 'オンライン (接続完了)');
 
-    // 2. WebSocket 高速ストリームの開始 (RunPodプロキシ・ファイアウォール完全回避)
+    // 2. WebSocket 高速ストリームの開始
     startWebSocketStream();
 
     // 3. 統計WebSocket開始
@@ -289,11 +290,21 @@ function startWebSocketStream() {
   streamWs.binaryType = 'arraybuffer';
 
   let waitingForResponse = false;
+  let lastSendTime = Date.now();
 
   streamWs.onopen = () => {
     console.log('[WebSocket Stream] 接続確立 - 映像送信ループ開始');
     videoPlaceholder.classList.add('hidden');
-    sendNextFrame();
+    // ビデオサイズが準備できるまで少し待機して送信開始
+    const checkReady = () => {
+      if (!isStreaming) return;
+      if (localVideo.videoWidth > 0 && localVideo.videoHeight > 0) {
+        sendNextFrame();
+      } else {
+        setTimeout(checkReady, 50);
+      }
+    };
+    checkReady();
   };
 
   streamWs.onmessage = async (event) => {
@@ -314,7 +325,6 @@ function startWebSocketStream() {
       console.warn('フレーム描画エラー:', e);
     }
 
-    // 次のフレームを送信
     if (isStreaming) {
       requestAnimationFrame(sendNextFrame);
     }
@@ -324,13 +334,20 @@ function startWebSocketStream() {
   streamWs.onclose = () => console.log('[WebSocket Stream] 切断');
 
   function sendNextFrame() {
-    if (!isStreaming || !localVideo.videoWidth || waitingForResponse) return;
+    if (!isStreaming || !localVideo.videoWidth) return;
+
+    // 応答待ちタイムアウト保護 (500ms以上応答がなければ再送)
+    if (waitingForResponse && (Date.now() - lastSendTime < 500)) {
+      return;
+    }
 
     captureCanvas.width = localVideo.videoWidth;
     captureCanvas.height = localVideo.videoHeight;
     captureCtx.drawImage(localVideo, 0, 0);
 
     waitingForResponse = true;
+    lastSendTime = Date.now();
+
     captureCanvas.toBlob((blob) => {
       if (blob && streamWs && streamWs.readyState === WebSocket.OPEN) {
         blob.arrayBuffer().then(buf => streamWs.send(buf));
