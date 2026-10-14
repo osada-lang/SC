@@ -1,5 +1,5 @@
 #!/bin/bash
-# LiveChat AI Studio - ワンクリック起動ランチャー
+# LiveChat AI Studio - 専用デスクトップアプリ（App Mode ランチャー）
 
 SERVER_URL="${1:-https://9hjxxdwunpfrc-8080.proxy.runpod.net}"
 
@@ -8,8 +8,14 @@ echo "  LiveChat AI Studio 専用デスクトップアプリを起動します"
 echo "  接続先サーバー: $SERVER_URL"
 echo "=================================================="
 
-# 必要なライブラリの確認
-pip3 install -q pywebview requests 2>/dev/null || true
-
-# デスクトップアプリの起動
-python3 scripts/desktop_app.py --server "$SERVER_URL"
+# Google Chrome が存在する場合は最速の App Mode（アドレスバーなし独立ウィンドウ）で起動
+if [ -d "/Applications/Google Chrome.app" ]; then
+    open -na "Google Chrome" --args --app="$SERVER_URL" --window-size=1360,860 --user-data-dir="/tmp/livechat_chrome_profile"
+elif [ -d "/Applications/Brave Browser.app" ]; then
+    open -na "Brave Browser" --args --app="$SERVER_URL" --window-size=1360,860
+elif [ -d "/Applications/Microsoft Edge.app" ]; then
+    open -na "Microsoft Edge" --args --app="$SERVER_URL" --window-size=1360,860
+else
+    # フォールバック: Safari で開く
+    open -a Safari "$SERVER_URL"
+fi
