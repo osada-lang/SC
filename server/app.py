@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 from typing import Optional
 from fastapi import FastAPI, UploadFile, File, Form, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack, RTCConfiguration, RTCIceServer
@@ -225,6 +225,31 @@ async def api_upload_target(file: UploadFile = File(...), name: Optional[str] = 
         "target_id": target_id,
         "url": f"/targets/{target_filename}"
     })
+
+@app.post("/api/process_frame")
+async def api_process_frame(file: UploadFile = File(...)):
+    """
+    HTTP POSTによる直接フレーム処理 (WebSocket切断時やプロキシ環境用の超堅牢フォールバック)
+    """
+    global latest_meta
+    contents = await file.read()
+    nparr = np.frombuffer(contents, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="Invalid image frame")
+
+    loop = asyncio.get_event_loop()
+    processed_img, meta = await loop.run_in_executor(
+        None,
+        pipeline.process_frame,
+        img
+    )
+    latest_meta = meta
+
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+    _, enc_img = cv2.imencode('.jpg', processed_img, encode_param)
+
+    return Response(content=enc_img.tobytes(), media_type="image/jpeg")
 
 @app.websocket("/ws/stream")
 async def websocket_stream(websocket: WebSocket):

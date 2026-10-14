@@ -291,11 +291,11 @@ function startWebSocketStream() {
 
   let waitingForResponse = false;
   let lastSendTime = Date.now();
+  let wsFailed = false;
 
   streamWs.onopen = () => {
     console.log('[WebSocket Stream] 接続確立 - 映像送信ループ開始');
     videoPlaceholder.classList.add('hidden');
-    // ビデオサイズが準備できるまで少し待機して送信開始
     const checkReady = () => {
       if (!isStreaming) return;
       if (localVideo.videoWidth > 0 && localVideo.videoHeight > 0) {
@@ -330,13 +330,25 @@ function startWebSocketStream() {
     }
   };
 
-  streamWs.onerror = (e) => console.warn('[WebSocket Stream] エラー:', e);
-  streamWs.onclose = () => console.log('[WebSocket Stream] 切断');
+  streamWs.onerror = (e) => {
+    console.warn('[WebSocket Stream] エラー発生 ➔ HTTP直接ストリームへフォールバックします');
+    if (!wsFailed) {
+      wsFailed = true;
+      startHttpStreamLoop();
+    }
+  };
+
+  streamWs.onclose = () => {
+    console.log('[WebSocket Stream] 切断 ➔ HTTP直接ストリームへフォールバックします');
+    if (!wsFailed) {
+      wsFailed = true;
+      startHttpStreamLoop();
+    }
+  };
 
   function sendNextFrame() {
-    if (!isStreaming || !localVideo.videoWidth) return;
+    if (!isStreaming || !localVideo.videoWidth || wsFailed) return;
 
-    // 応答待ちタイムアウト保護 (500ms以上応答がなければ再送)
     if (waitingForResponse && (Date.now() - lastSendTime < 500)) {
       return;
     }
@@ -354,8 +366,87 @@ function startWebSocketStream() {
       } else {
         waitingForResponse = false;
       }
-    }, 'image/jpeg', 0.80);
+    }, 'image/jpeg', 0.75);
   }
+}
+
+// プロキシ・ファイアウォール完全回避のHTTP POSTストリーミング
+let isHttpLoopRunning = false;
+async function startHttpStreamLoop() {
+  if (isHttpLoopRunning || !isStreaming) return;
+  isHttpLoopRunning = true;
+  console.log('[HTTP Stream] 安定直接ストリーミングループ開始');
+  videoPlaceholder.classList.add('hidden');
+
+  let inFlight = false;
+  let frameCount = 0;
+  let lastFpsCalc = Date.now();
+
+  const loop = async () => {
+    if (!isStreaming) {
+      isHttpLoopRunning = false;
+      return;
+    }
+
+    if (localVideo.videoWidth > 0 && !inFlight) {
+      captureCanvas.width = localVideo.videoWidth;
+      captureCanvas.height = localVideo.videoHeight;
+      captureCtx.drawImage(localVideo, 0, 0);
+
+      inFlight = true;
+      captureCanvas.toBlob(async (blob) => {
+        if (!blob || !isStreaming) {
+          inFlight = false;
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', blob, 'frame.jpg');
+
+        const startTime = performance.now();
+        try {
+          const res = await fetch('/api/process_frame', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (res.ok) {
+            const respBlob = await res.blob();
+            const imgBitmap = await createImageBitmap(respBlob);
+            if (remoteCanvas.width !== imgBitmap.width || remoteCanvas.height !== imgBitmap.height) {
+              remoteCanvas.width = imgBitmap.width;
+              remoteCanvas.height = imgBitmap.height;
+            }
+            canvasCtx.drawImage(imgBitmap, 0, 0);
+
+            // FPS・遅延の計算とUI更新
+            const latency = Math.round(performance.now() - startTime);
+            statLatency.textContent = `${latency} ms`;
+            frameCount++;
+            const now = Date.now();
+            if (now - lastFpsCalc >= 1000) {
+              statFPS.textContent = `${Math.round(frameCount * 1000 / (now - lastFpsCalc))}`;
+              frameCount = 0;
+              lastFpsCalc = now;
+            }
+          }
+        } catch (err) {
+          console.warn('[HTTP Stream] 通信エラー:', err);
+        } finally {
+          inFlight = false;
+          if (isStreaming) {
+            requestAnimationFrame(loop);
+          }
+        }
+      }, 'image/jpeg', 0.75);
+    } else {
+      if (isStreaming) {
+        requestAnimationFrame(loop);
+      }
+    }
+  };
+
+  requestAnimationFrame(loop);
 }
 
 async function tryStartWebRTC() {
