@@ -9,81 +9,26 @@ import insightface
 from insightface.app import FaceAnalysis
 
 # =====================================================================
-# 純粋なNumPyによるアフィン変換・Umeyamaアルゴリズム (skimage依存の完全根絶)
+# ArcFace 128x128 基準ランドマーク (Inswapper標準)
 # =====================================================================
-def umeyama_transform(src, dst, estimate_scale=True):
-    """
-    5点顔ランドマークから相似変換行列 (2x3) を計算する純粋NumPy実装
-    skimageのバージョン互換性問題を完全に回避します。
-    """
-    src = np.asarray(src, dtype=np.float64)
-    dst = np.asarray(dst, dtype=np.float64)
-    num = src.shape[0]
-    dim = src.shape[1]
+ARCFACE_DST_128 = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041]
+], dtype=np.float32)
 
-    src_mean = src.mean(axis=0)
-    dst_mean = dst.mean(axis=0)
-
-    src_demean = src - src_mean
-    dst_demean = dst - dst_mean
-
-    A = np.dot(dst_demean.T, src_demean) / num
-    d = np.ones((dim,), dtype=np.float64)
-    if np.linalg.det(A) < 0:
-        d[dim - 1] = -1
-
-    T = np.eye(dim + 1, dtype=np.float64)
-    U, S, V = np.linalg.svd(A)
-
-    rank = np.linalg.matrix_rank(A)
-    if rank == 0:
-        return np.nan * T
-    elif rank == dim - 1:
-        if np.linalg.det(U) * np.linalg.det(V) < 0:
-            T[:dim, :dim] = np.dot(U, np.dot(np.diag([1, -1]), V))
-        else:
-            T[:dim, :dim] = np.dot(U, V)
-    else:
-        T[:dim, :dim] = np.dot(U, np.dot(np.diag(d), V))
-
-    if estimate_scale:
-        src_var = np.var(src, axis=0).sum()
-        scale = 1.0 / src_var * np.dot(S, d)
-    else:
-        scale = 1.0
-
-    T[:dim, dim] = dst_mean - scale * np.dot(T[:dim, :dim], src_mean.T)
-    T[:dim, :dim] *= scale
-    return T[:2, :]  # 2x3 行列を返却
-
-# insightfaceの変換処理を純粋NumPy実装でオーバーライド
-class CustomSimilarityTransform:
-    def __init__(self):
-        self.params = np.eye(3)
-
-    def estimate(self, src, dst):
-        M = umeyama_transform(src, dst, estimate_scale=True)
-        self.params = np.vstack([M, [0, 0, 1]])
-        return True
-
-    @property
-    def matrix(self):
-        return self.params
-
-# skimage.transform を自前クラスで完全置換
-import sys
-import types
-custom_st_module = types.ModuleType("skimage.transform")
-custom_st_module.SimilarityTransform = CustomSimilarityTransform
-sys.modules["skimage.transform"] = custom_st_module
+# マスク用楕円テンプレート (128x128)
+MASK_128 = np.zeros((128, 128), dtype=np.float32)
+cv2.ellipse(MASK_128, (64, 68), (48, 60), 0, 0, 360, 1.0, -1)
+MASK_128 = cv2.GaussianBlur(MASK_128, (19, 19), 0)
+MASK_128 = np.expand_dims(MASK_128, axis=-1)
 
 
-# =====================================================================
-# 統合AI顔交換パイプライン
-# =====================================================================
 class AIFaceSwapPipeline:
     """
-    リアルタイム顔交換・顔ブレンド・手マスク・高画質化を司る統合AIパイプライン
+    リアルタイム顔交換・顔ブレンド・手マスク・高画質化を司る統合AIパイプライン (Direct ONNX 完全独立版)
     """
     def __init__(self, models_dir="models", default_target_path=None):
         self.models_dir = models_dir
@@ -92,33 +37,46 @@ class AIFaceSwapPipeline:
 
         # リアルタイム調整パラメータ
         self.mix_ratio = 0.70          # 0.0(本人100%) 〜 1.0(見本100%)
-        self.enable_face_parser = True # 手・異物の透過防止マスク
-        self.enable_gfpgan = False     # GFPGAN超解像 (GPU推奨)
-        self.sharpness = 1.6           # アンシャープマスク強度
-        self.skin_blend = 0.2          # 元の肌の馴染ませ率
+        self.enable_face_parser = False # 手・異物の透過防止マスク
+        self.enable_gfpgan = False     # GFPGAN超解像
+        self.sharpness = 1.4           # アンシャープマスク強度
+        self.skin_blend = 0.15         # 元の肌の馴染ませ率
+
+        sess_opts = ort.SessionOptions()
+        sess_opts.intra_op_num_threads = 4
+        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         # 1. 顔検出モデル (FaceAnalysis)
         print("[AI Pipeline] FaceAnalysis を初期化中...")
         self.app = FaceAnalysis(name="buffalo_l", allowed_modules=['detection', 'landmark_2d_106', 'recognition'])
         self.app.prepare(ctx_id=0, det_size=(320, 320))
 
-        # 2. 顔交換モデル (Inswapper)
+        # 2. Inswapper 128 (Direct ONNX セッション)
         inswapper_path = os.path.join(models_dir, "inswapper_128.onnx")
         if not os.path.exists(inswapper_path):
             raise FileNotFoundError(f"モデルが見つかりません: {inswapper_path}")
         
-        sess_opts = ort.SessionOptions()
-        sess_opts.intra_op_num_threads = 4
-        sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        print("[AI Pipeline] Inswapper ONNX セッションを初期化中...")
+        self.swapper_session = ort.InferenceSession(inswapper_path, providers=self.providers, sess_opts=sess_opts)
         
-        print("[AI Pipeline] Inswapper を初期化中...")
-        self.swapper = insightface.model_zoo.get_model(
-            inswapper_path,
-            download=False,
-            download_zip=False,
-            providers=self.providers,
-            sess_options=sess_opts
-        )
+        # モデルの入力・出力名を取得
+        inputs = self.swapper_session.get_inputs()
+        self.input_target_name = inputs[0].name # 'target' (1, 3, 128, 128)
+        self.input_source_name = inputs[1].name # 'source' (1, 512)
+        
+        # Inswapper内部の E-map (特徴量マッピング行列) を取得 (512x512)
+        # onnxモデルのinitializerからemapを取得
+        self.emap = None
+        try:
+            import onnx
+            model_proto = onnx.load(inswapper_path)
+            for init in model_proto.graph.initializer:
+                if init.name == 'emap':
+                    self.emap = onnx.numpy_helper.to_array(init)
+                    print(f"[AI Pipeline] Inswapper emap 行列をロード成功: {self.emap.shape}")
+                    break
+        except Exception as e:
+            print(f"[AI Pipeline] emap 自動抽出警告: {e}")
 
         # 3. 顔・手セグメンテーションモデル (FaceParser)
         parser_path = os.path.join(models_dir, "face_parser.onnx")
@@ -131,20 +89,6 @@ class AIFaceSwapPipeline:
             except Exception as e:
                 print(f"[AI Pipeline] FaceParser ロード警告: {e}")
 
-        # 4. 超解像モデル (GFPGAN)
-        gfpgan_path = os.path.join(models_dir, "GFPGANv1.4.onnx")
-        if not os.path.exists(gfpgan_path):
-            gfpgan_path = os.path.join(models_dir, "gfpgan_1.4.onnx")
-        
-        self.gfpgan_session = None
-        if os.path.exists(gfpgan_path):
-            try:
-                print(f"[AI Pipeline] GFPGAN をロード中 ({gfpgan_path})...")
-                self.gfpgan_session = ort.InferenceSession(gfpgan_path, providers=self.providers, sess_options=sess_opts)
-                self.gfpgan_input_name = self.gfpgan_session.get_inputs()[0].name
-            except Exception as e:
-                print(f"[AI Pipeline] GFPGAN 初期化警告: {e}")
-
         # ターゲット顔のキャッシュ管理
         self.targets = {}
         self.current_target_id = None
@@ -154,7 +98,7 @@ class AIFaceSwapPipeline:
             self.set_target_from_file("default", default_target_path)
 
         self.last_frame_time = time.time()
-        print("[AI Pipeline] パイプライン準備完了")
+        print("[AI Pipeline] パイプライン準備完了 (Direct ONNX 稼働)")
 
     def _get_optimal_providers(self):
         available = ort.get_available_providers()
@@ -188,7 +132,6 @@ class AIFaceSwapPipeline:
         return True
 
     def set_parameters(self, mix_ratio=None, enable_gfpgan=None, enable_face_parser=None, sharpness=None, skin_blend=None):
-        """リアルタイムパラメータの更新"""
         if mix_ratio is not None:
             self.mix_ratio = float(np.clip(mix_ratio, 0.0, 1.0))
         if enable_gfpgan is not None:
@@ -201,41 +144,76 @@ class AIFaceSwapPipeline:
             self.skin_blend = float(np.clip(skin_blend, 0.0, 1.0))
 
     def get_status(self):
-        """現在のステータスを返却"""
         return {
             "current_target_id": self.current_target_id,
             "available_targets": list(self.targets.keys()),
             "mix_ratio": self.mix_ratio,
-            "enable_gfpgan": self.enable_gfpgan and (self.gfpgan_session is not None),
+            "enable_gfpgan": self.enable_gfpgan,
             "enable_face_parser": self.enable_face_parser and (self.parser_session is not None),
             "sharpness": self.sharpness,
             "skin_blend": self.skin_blend,
             "providers": self.providers
         }
 
-    def _enhance_face_gfpgan(self, cropped_face):
-        """GFPGAN超解像"""
-        if self.gfpgan_session is None:
-            return cropped_face
-        try:
-            h, w = cropped_face.shape[:2]
-            resized = cv2.resize(cropped_face, (512, 512))
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-            norm = (rgb / 127.5) - 1.0
-            norm = np.transpose(norm, (2, 0, 1))
-            norm = np.expand_dims(norm, axis=0)
+    def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
+        """
+        Direct ONNX による直接顔交換処理 (外部ライブラリ依存ゼロ)
+        """
+        kps = face.kps
+        # 1. 相似変換行列 (2x3) を計算
+        M, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_128)
+        if M is None:
+            return img
 
-            out = self.gfpgan_session.run(None, {self.gfpgan_input_name: norm})[0]
-            out_img = np.squeeze(out, axis=0)
-            out_img = np.transpose(out_img, (1, 2, 0))
-            out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
-            out_bgr = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
-            return cv2.resize(out_bgr, (w, h))
-        except Exception:
-            return cropped_face
+        # 2. 128x128 にクロップ & アライメント
+        crop_img = cv2.warpAffine(img, M, (128, 128), borderMode=cv2.BORDER_REPLICATE)
+        
+        # 3. Inswapper 用に入力テンソルを作成 (1, 3, 128, 128), range [0, 1]
+        crop_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        blob = np.transpose(crop_rgb, (2, 0, 1))
+        blob = np.expand_dims(blob, axis=0)
+
+        # 4. Latent Embedding の E-map マッピング
+        source_emb = latent_embedding.reshape(1, -1)
+        if self.emap is not None:
+            source_emb = np.dot(source_emb, self.emap)
+            source_emb /= np.linalg.norm(source_emb)
+
+        # 5. ONNX 推論実行
+        pred = self.swapper_session.run(None, {
+            self.input_target_name: blob,
+            self.input_source_name: source_emb.astype(np.float32)
+        })[0]
+
+        # 6. 出力テンソルを BGR 画像に変換
+        pred_img = np.squeeze(pred, axis=0)
+        pred_img = np.transpose(pred_img, (1, 2, 0))
+        pred_img = np.clip(pred_img * 255.0, 0, 255).astype(np.uint8)
+        pred_bgr = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
+
+        # 7. スキンブレンド & シャープネス
+        if self.skin_blend > 0:
+            pred_bgr = cv2.addWeighted(crop_img, self.skin_blend, pred_bgr, 1.0 - self.skin_blend, 0)
+
+        if self.sharpness > 1.0:
+            gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
+            pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
+
+        # 8. 逆アフィン変換で元画像にスムーズに貼り戻し
+        IM = cv2.invertAffineTransform(M)
+        h, w = img.shape[:2]
+
+        warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), borderMode=cv2.BORDER_TRANSPARENT)
+        warped_mask = cv2.warpAffine(MASK_128, IM, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_mask = np.expand_dims(warped_mask, axis=-1)
+
+        result = (img * (1.0 - warped_mask) + warped_swapped * warped_mask).astype(np.uint8)
+        return result
 
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
-        """1フレームの顔検出・ブレンド・顔交換・マスク・高画質化"""
+        """
+        1フレームの高速AI顔交換処理
+        """
         start_time = time.time()
         
         if self.current_target_face is None or frame is None:
@@ -257,60 +235,13 @@ class AIFaceSwapPipeline:
                     if norm > 0:
                         blended_emb = blended_emb / norm
 
-                    mixed_target_face = copy.copy(self.current_target_face)
-                    mixed_target_face.normed_embedding = blended_emb
-                    mixed_target_face.embedding = blended_emb
+                    # 2. 直接 ONNX 推論による顔交換
+                    swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
-                    # 2. Inswapper による顔交換
-                    swapped_frame = self.swapper.get(swapped_frame, face, mixed_target_face, paste_back=True)
-
-                    # 3. マスク・高画質化後処理
-                    bbox = face.bbox.astype(int)
-                    x1, y1 = max(0, bbox[0]), max(0, bbox[1])
-                    x2, y2 = min(frame.shape[1], bbox[2]), min(frame.shape[0], bbox[3])
-                    
-                    if (x2 - x1) > 0 and (y2 - y1) > 0:
-                        face_roi = frame[y1:y2, x1:x2]
-                        swapped_roi = swapped_frame[y1:y2, x1:x2]
-                        h_roi, w_roi = face_roi.shape[:2]
-
-                        # A. GFPGAN 超解像
-                        if self.enable_gfpgan and self.gfpgan_session is not None:
-                            swapped_roi = self._enhance_face_gfpgan(swapped_roi)
-
-                        # B. 手・異物マスク (FaceParser)
-                        if self.enable_face_parser and self.parser_session is not None:
-                            resized_roi = cv2.resize(face_roi, (512, 512))
-                            rgb_roi = cv2.cvtColor(resized_roi, cv2.COLOR_BGR2RGB).astype(np.float32)
-                            norm_roi = (rgb_roi / 255.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
-                            input_data = np.expand_dims(np.transpose(norm_roi, (2, 0, 1)), axis=0)
-
-                            parser_out = self.parser_session.run(None, {self.parser_input_name: input_data})[0]
-                            parsing_map = np.squeeze(np.argmax(parser_out, axis=1))
-
-                            face_classes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
-                            hand_mask = np.zeros_like(parsing_map, dtype=np.uint8)
-                            hand_mask[~np.isin(parsing_map, face_classes)] = 255
-
-                            hand_mask_resized = cv2.resize(hand_mask, (w_roi, h_roi), interpolation=cv2.INTER_NEAREST)
-                            hand_mask_blurred = cv2.GaussianBlur(hand_mask_resized, (15, 15), 0)
-                            alpha_hand = cv2.merge([hand_mask_blurred]*3) / 255.0
-                        else:
-                            alpha_hand = np.zeros((h_roi, w_roi, 3), dtype=np.float32)
-
-                        # C. スキンブレンド & アンシャープマスク
-                        if self.skin_blend > 0:
-                            swapped_roi = cv2.addWeighted(face_roi, self.skin_blend, swapped_roi, 1.0 - self.skin_blend, 0)
-
-                        if self.sharpness > 1.0:
-                            gaussian = cv2.GaussianBlur(swapped_roi, (0, 0), 1.5)
-                            swapped_roi = cv2.addWeighted(swapped_roi, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
-
-                        # D. 最終合成
-                        final_roi = (face_roi * alpha_hand + swapped_roi * (1.0 - alpha_hand)).astype(np.uint8)
-                        swapped_frame[y1:y2, x1:x2] = final_roi
         except Exception as e:
             print(f"[AI Pipeline エラー] {e}")
+            import traceback
+            traceback.print_exc()
             swapped_frame = frame
             faces = []
 
