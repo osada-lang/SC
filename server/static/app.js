@@ -184,6 +184,8 @@ async function getCameraStream(deviceId) {
 }
 
 // --- リアルタイム ストリーミング (高速直接パイプライン) ---
+let streamWs = null;
+
 async function startStream() {
   btnStart.disabled = true;
   btnStart.textContent = '接続中...';
@@ -201,7 +203,7 @@ async function startStream() {
     setConnectionStatus('connected', 'オンライン (RTX 4090)');
     videoPlaceholder.classList.add('hidden');
 
-    startStreamingLoop();
+    startFastWebSocketStream();
     connectStatsWebSocket();
   } catch (err) {
     console.error('起動エラー:', err);
@@ -210,7 +212,82 @@ async function startStream() {
   }
 }
 
-function startStreamingLoop() {
+function startFastWebSocketStream() {
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  streamWs = new WebSocket(`${protocol}//${window.location.host}/ws/stream`);
+  streamWs.binaryType = 'arraybuffer';
+
+  let inFlightCount = 0;
+  const maxInFlight = 2; // 最大2フレームまで非同期パイプライン先行送信
+  let frameCount = 0;
+  let lastFpsCalc = Date.now();
+  let sendTimer = null;
+
+  streamWs.onopen = () => {
+    console.log('[Fast WS Stream] 常時接続確立 - 30 FPS 送信開始');
+    
+    // 30 FPS タイマーでフレームを連続プッシュ
+    sendTimer = setInterval(() => {
+      if (!isStreaming || !localVideo.videoWidth) return;
+      if (inFlightCount >= maxInFlight) return; // 混雑時はスキップ
+
+      const targetW = 640;
+      const targetH = Math.round(targetW * (localVideo.videoHeight / localVideo.videoWidth));
+      captureCanvas.width = targetW;
+      captureCanvas.height = targetH;
+      captureCtx.drawImage(localVideo, 0, 0, targetW, targetH);
+
+      const sendStart = performance.now();
+      inFlightCount++;
+
+      captureCanvas.toBlob((blob) => {
+        if (blob && streamWs && streamWs.readyState === WebSocket.OPEN) {
+          blob.arrayBuffer().then(buf => streamWs.send(buf));
+        } else {
+          inFlightCount--;
+        }
+      }, 'image/jpeg', 0.70);
+    }, 33); // 約30 FPS
+  };
+
+  streamWs.onmessage = async (event) => {
+    inFlightCount = Math.max(0, inFlightCount - 1);
+    if (!isStreaming) return;
+
+    try {
+      const blob = new Blob([event.data], { type: 'image/jpeg' });
+      const imgBitmap = await createImageBitmap(blob);
+      if (remoteCanvas.width !== imgBitmap.width || remoteCanvas.height !== imgBitmap.height) {
+        remoteCanvas.width = imgBitmap.width;
+        remoteCanvas.height = imgBitmap.height;
+      }
+      canvasCtx.drawImage(imgBitmap, 0, 0);
+
+      frameCount++;
+      const now = Date.now();
+      if (now - lastFpsCalc >= 1000) {
+        statFPS.textContent = `${Math.round(frameCount * 1000 / (now - lastFpsCalc))}`;
+        frameCount = 0;
+        lastFpsCalc = now;
+      }
+    } catch (e) {
+      console.warn('フレーム描画エラー:', e);
+    }
+  };
+
+  streamWs.onerror = () => {
+    console.warn('[Fast WS Stream] WebSocketエラー ➔ HTTPパイプラインへ自動切替');
+    if (sendTimer) clearInterval(sendTimer);
+    startHttpFallbackLoop();
+  };
+
+  streamWs.onclose = () => {
+    if (sendTimer) clearInterval(sendTimer);
+    if (isStreaming) startHttpFallbackLoop();
+  };
+}
+
+function startHttpFallbackLoop() {
   let inFlight = false;
   let frameCount = 0;
   let lastFpsCalc = Date.now();
@@ -219,10 +296,8 @@ function startStreamingLoop() {
     if (!isStreaming) return;
 
     if (localVideo.videoWidth > 0 && !inFlight) {
-      // 送信解像度を 854x480 (16:9) に最適化スケーリング (超低遅延・高応答化)
-      const targetW = 854;
+      const targetW = 640;
       const targetH = Math.round(targetW * (localVideo.videoHeight / localVideo.videoWidth));
-      
       captureCanvas.width = targetW;
       captureCanvas.height = targetH;
       captureCtx.drawImage(localVideo, 0, 0, targetW, targetH);
@@ -249,7 +324,6 @@ function startStreamingLoop() {
             }
             canvasCtx.drawImage(imgBitmap, 0, 0);
 
-            // FPS・遅延の計算
             const latency = Math.round(performance.now() - startTime);
             statLatency.textContent = `${latency} ms`;
             frameCount++;
@@ -277,6 +351,10 @@ function startStreamingLoop() {
 
 function stopStream() {
   isStreaming = false;
+  if (streamWs) {
+    streamWs.close();
+    streamWs = null;
+  }
   if (localStream) {
     localStream.getTracks().forEach(t => t.stop());
     localStream = null;

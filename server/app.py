@@ -126,7 +126,36 @@ async def api_process_frame(file: UploadFile = File(...)):
         print(f"[API Process Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. WebRTC シグナリング
+# 2. 超低遅延常時接続 WebSocket ストリーミング
+@app.websocket("/ws/stream")
+async def websocket_stream(websocket: WebSocket):
+    global latest_meta
+    await websocket.accept()
+    loop = asyncio.get_event_loop()
+    print("[WebSocket Stream] 常時接続ストリーム確立 (30 FPS)")
+
+    try:
+        while True:
+            data = await websocket.receive_bytes()
+            if not data:
+                continue
+
+            nparr = np.frombuffer(data, np.uint8)
+            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+
+            processed_img, meta = await loop.run_in_executor(None, pipeline.process_frame, img)
+            latest_meta = meta
+
+            _, enc_img = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, 78])
+            await websocket.send_bytes(enc_img.tobytes())
+    except WebSocketDisconnect:
+        print("[WebSocket Stream] 正常切断")
+    except Exception as e:
+        print(f"[WebSocket Stream エラー] {e}")
+
+# 3. WebRTC シグナリング
 @app.post("/offer")
 async def rtc_offer(params: dict):
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
