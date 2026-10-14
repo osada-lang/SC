@@ -148,7 +148,7 @@ async def websocket_stream(websocket: WebSocket):
             processed_img, meta = await loop.run_in_executor(None, pipeline.process_frame, img)
             latest_meta = meta
 
-            _, enc_img = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, 78])
+            _, enc_img = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, 85])
             await websocket.send_bytes(enc_img.tobytes())
     except WebSocketDisconnect:
         print("[WebSocket Stream] 正常切断")

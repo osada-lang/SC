@@ -218,20 +218,22 @@ function startFastWebSocketStream() {
   streamWs.binaryType = 'arraybuffer';
 
   let inFlightCount = 0;
-  const maxInFlight = 2; // 最大2フレームまで非同期パイプライン先行送信
+  const maxInFlight = 2; // パイプライン非同期送信
   let frameCount = 0;
   let lastFpsCalc = Date.now();
   let sendTimer = null;
+  const sendTimestamps = [];
 
   streamWs.onopen = () => {
-    console.log('[Fast WS Stream] 常時接続確立 - 30 FPS 送信開始');
+    console.log('[Fast WS Stream] 常時接続確立 - 1280x720 HD送信開始');
     
     // 30 FPS タイマーでフレームを連続プッシュ
     sendTimer = setInterval(() => {
       if (!isStreaming || !localVideo.videoWidth) return;
-      if (inFlightCount >= maxInFlight) return; // 混雑時はスキップ
+      if (inFlightCount >= maxInFlight) return; // ネットワーク渋滞時は間引き
 
-      const targetW = 640;
+      // 高精細 1280x720 HD画質で送信 (背景・服もクリアに維持)
+      const targetW = 1280;
       const targetH = Math.round(targetW * (localVideo.videoHeight / localVideo.videoWidth));
       captureCanvas.width = targetW;
       captureCanvas.height = targetH;
@@ -239,19 +241,27 @@ function startFastWebSocketStream() {
 
       const sendStart = performance.now();
       inFlightCount++;
+      sendTimestamps.push(sendStart);
 
       captureCanvas.toBlob((blob) => {
         if (blob && streamWs && streamWs.readyState === WebSocket.OPEN) {
           blob.arrayBuffer().then(buf => streamWs.send(buf));
         } else {
-          inFlightCount--;
+          inFlightCount = Math.max(0, inFlightCount - 1);
+          sendTimestamps.shift();
         }
-      }, 'image/jpeg', 0.70);
-    }, 33); // 約30 FPS
+      }, 'image/jpeg', 0.82);
+    }, 33);
   };
 
   streamWs.onmessage = async (event) => {
     inFlightCount = Math.max(0, inFlightCount - 1);
+    const sentTime = sendTimestamps.shift();
+    if (sentTime) {
+      const lat = Math.round(performance.now() - sentTime);
+      statLatency.textContent = `${lat} ms`;
+    }
+
     if (!isStreaming) return;
 
     try {

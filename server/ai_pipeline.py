@@ -199,15 +199,16 @@ class AIFaceSwapPipeline:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
 
-        # 8. 逆アフィン変換で元画像にスムーズに貼り戻し
+        # 8. 逆アフィン変換で元画像にスムーズに貼り戻し (高品質CUBIC補間)
         IM = cv2.invertAffineTransform(M)
         h, w = img.shape[:2]
 
-        warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), borderMode=cv2.BORDER_TRANSPARENT)
-        warped_mask = cv2.warpAffine(MASK_128, IM, (w, h), borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
+        warped_mask = cv2.warpAffine(MASK_128, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         warped_mask = np.expand_dims(warped_mask, axis=-1)
 
-        result = (img * (1.0 - warped_mask) + warped_swapped * warped_mask).astype(np.uint8)
+        # 背景や服・体は元画像 100%、顔の領域のみを滑らかに合成
+        result = (img.astype(np.float32) * (1.0 - warped_mask) + warped_swapped.astype(np.float32) * warped_mask).astype(np.uint8)
         return result
 
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
