@@ -7,7 +7,6 @@ import queue
 import cv2
 import numpy as np
 import requests
-import websocket
 
 # 仮想カメラ対応 (pyvirtualcam がインストールされている場合)
 try:
@@ -22,46 +21,24 @@ latest_fps = 0.0
 latest_latency = 0.0
 show_original = False
 
-def capture_and_stream_thread(server_url: str, camera_index: int):
+# スレッド間通信用キュー
+send_queue = queue.Queue(maxsize=2)
+result_queue = queue.Queue(maxsize=2)
+
+def network_worker(server_url: str):
     """
-    バックグラウンドスレッドでカメラキャプチャ & クラウドサーバーへ高速ストリーミング
+    バックグラウンドスレッドでクラウドGPUサーバーとフレーム送受信
     """
-    global is_running, display_frame, latest_fps, latest_latency, show_original
-    
-    print(f"[クライアント] カメラ (Index: {camera_index}) を起動中...")
-    cap = cv2.VideoCapture(camera_index)
-    if not cap.isOpened():
-        for i in range(1, 5):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                print(f"[クライアント] カメラインデックス {i} で起動しました。")
-                break
-        else:
-            print("エラー: カメラを起動できませんでした。")
-            is_running = False
-            return
+    global is_running, latest_fps, latest_latency
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-
-    # WebSocket URL の構築
-    ws_url = server_url.replace("https://", "wss://").replace("http://", "ws://").rstrip("/") + "/ws/stream"
-    http_fallback_url = server_url.rstrip("/") + "/api/process_frame"
-
-    print(f"[クライアント] ストリーミング接続先: {ws_url}")
-
+    http_url = server_url.rstrip("/") + "/api/process_frame"
     frame_count = 0
     last_fps_time = time.time()
 
     while is_running:
-        ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.01)
-            continue
-
-        if show_original:
-            display_frame = frame
-            time.sleep(0.03)
+        try:
+            frame = send_queue.get(timeout=0.2)
+        except queue.Empty:
             continue
 
         # 1280x720 ➔ 854x480 送信用にスケーリング
@@ -70,16 +47,13 @@ def capture_and_stream_thread(server_url: str, camera_index: int):
         target_h = int(target_w * (h / w))
         small_frame = cv2.resize(frame, (target_w, target_h))
 
-        # JPEG圧縮
         _, enc_jpg = cv2.imencode('.jpg', small_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
         jpg_bytes = enc_jpg.tobytes()
 
         start_t = time.time()
-
         try:
-            # HTTP POST による確実な高速フレーム処理
             res = requests.post(
-                http_fallback_url,
+                http_url,
                 files={"file": ("frame.jpg", jpg_bytes, "image/jpeg")},
                 timeout=1.0
             )
@@ -87,8 +61,12 @@ def capture_and_stream_thread(server_url: str, camera_index: int):
                 resp_arr = np.frombuffer(res.content, np.uint8)
                 proc_img = cv2.imdecode(resp_arr, cv2.IMREAD_COLOR)
                 if proc_img is not None:
-                    display_frame = proc_img
                     latest_latency = (time.time() - start_t) * 1000
+
+                    if result_queue.full():
+                        try: result_queue.get_nowait()
+                        except queue.Empty: pass
+                    result_queue.put(proc_img)
 
                     frame_count += 1
                     now = time.time()
@@ -99,8 +77,7 @@ def capture_and_stream_thread(server_url: str, camera_index: int):
         except Exception:
             pass
 
-    cap.release()
-    print("[ストリームスレッド] 終了しました。")
+    print("[通信スレッド] 終了しました。")
 
 
 def main():
@@ -120,13 +97,29 @@ def main():
     print("    - [s] キー: 元映像 / AI変換後 切り替え")
     print("==================================================")
 
-    # 通信スレッド起動
-    stream_thread = threading.Thread(
-        target=capture_and_stream_thread,
-        args=(args.server, args.camera),
+    # 1. 【超重要】macOSのカメラ初期化は必ずメインスレッドで実行
+    print(f"[メインスレッド] カメラ (Index: {args.camera}) を起動中...")
+    cap = cv2.VideoCapture(args.camera)
+    if not cap.isOpened():
+        for i in range(1, 5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                print(f"[メインスレッド] カメラインデックス {i} で起動しました。")
+                break
+        else:
+            print("エラー: カメラを起動できませんでした。")
+            return
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+
+    # 2. 通信ワーカースレッド起動
+    worker_thread = threading.Thread(
+        target=network_worker,
+        args=(args.server,),
         daemon=True
     )
-    stream_thread.start()
+    worker_thread.start()
 
     # 仮想カメラ初期化
     vcam = None
@@ -143,36 +136,54 @@ def main():
 
     try:
         while is_running:
-            if display_frame is not None:
-                view = display_frame.copy()
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.01)
+                continue
 
-                # ステータス情報描画
-                status_text = f"Latency: {latest_latency:.0f}ms | FPS: {latest_fps:.1f} | Mode: {'Original' if show_original else 'AI Face Swap'}"
-                cv2.putText(view, status_text, (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # 最新フレームを送信キューへ投入
+            if send_queue.full():
+                try: send_queue.get_nowait()
+                except queue.Empty: pass
+            send_queue.put(frame)
 
-                cv2.imshow(window_name, view)
+            # 処理済みフレームの取得
+            try:
+                proc_frame = result_queue.get_nowait()
+                display_frame = proc_frame
+            except queue.Empty:
+                pass
 
-                if vcam is not None:
-                    out_frame = cv2.resize(view, (1280, 720))
-                    vcam.send(out_frame)
-                    vcam.sleep_until_next_frame()
+            # 画面描画
+            view = frame.copy() if show_original else (display_frame if display_frame is not None else frame)
+            view = view.copy()
 
-            key = cv2.waitKey(10) & 0xFF
+            status_text = f"Latency: {latest_latency:.0f}ms | FPS: {latest_fps:.1f} | Mode: {'Original' if show_original else 'AI Face Swap'}"
+            cv2.putText(view, status_text, (16, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+            cv2.imshow(window_name, view)
+
+            if vcam is not None:
+                out_frame = cv2.resize(view, (1280, 720))
+                vcam.send(out_frame)
+                vcam.sleep_until_next_frame()
+
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 is_running = False
                 break
             elif key == ord('s'):
                 show_original = not show_original
 
-            time.sleep(0.005)
     except KeyboardInterrupt:
         is_running = False
     finally:
         is_running = False
+        cap.release()
         if vcam is not None:
             vcam.close()
         cv2.destroyAllWindows()
-        print("[メイン] 正常終了しました。")
+        print("[メインスレッド] 正常終了しました。")
 
 if __name__ == "__main__":
     main()
