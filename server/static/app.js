@@ -1,12 +1,9 @@
-let pc = null;
 let localStream = null;
 let statsWs = null;
-let streamWs = null;
 let isStreaming = false;
 let isShowingLocal = false;
 
 // DOM要素
-const remoteVideo = document.getElementById('remoteVideo');
 const remoteCanvas = document.getElementById('remoteCanvas');
 const localVideo = document.getElementById('localVideo');
 const videoPlaceholder = document.getElementById('videoPlaceholder');
@@ -15,10 +12,6 @@ const btnStart = document.getElementById('btnStart');
 const btnStop = document.getElementById('btnStop');
 const btnToggleSource = document.getElementById('btnToggleSource');
 const cameraSelect = document.getElementById('cameraSelect');
-
-const canvasCtx = remoteCanvas ? remoteCanvas.getContext('2d') : null;
-const captureCanvas = document.createElement('canvas');
-const captureCtx = captureCanvas.getContext('2d');
 
 const connectionStatus = document.getElementById('connectionStatus');
 const statLatency = document.getElementById('statLatency');
@@ -37,6 +30,10 @@ const sliderSharpness = document.getElementById('sliderSharpness');
 const sharpnessVal = document.getElementById('sharpnessVal');
 const sliderSkinBlend = document.getElementById('sliderSkinBlend');
 const skinBlendVal = document.getElementById('skinBlendVal');
+
+const canvasCtx = remoteCanvas.getContext('2d');
+const captureCanvas = document.createElement('canvas');
+const captureCtx = captureCanvas.getContext('2d');
 
 // --- ターゲット画像管理 ---
 async function fetchTargets() {
@@ -89,10 +86,7 @@ fileInput.addEventListener('change', async (e) => {
   btnUploadTrigger.textContent = '解析・アップロード中...';
 
   try {
-    const res = await fetch('/api/targets/upload', {
-      method: 'POST',
-      body: formData
-    });
+    const res = await fetch('/api/targets/upload', { method: 'POST', body: formData });
     const result = await res.json();
     if (res.ok) {
       await fetchTargets();
@@ -100,7 +94,7 @@ fileInput.addEventListener('change', async (e) => {
       alert(`アップロード失敗: ${result.detail || '顔が検出されませんでした'}`);
     }
   } catch (err) {
-    alert('アップロード中に通信エラーが発生しました');
+    alert('通信エラーが発生しました');
   } finally {
     btnUploadTrigger.disabled = false;
     btnUploadTrigger.innerHTML = `
@@ -117,28 +111,20 @@ fileInput.addEventListener('change', async (e) => {
 
 // --- パラメータ制御 ---
 function updateMixRatioLabel(val) {
-  const targetPct = val;
-  const sourcePct = 100 - val;
-  mixRatioVal.textContent = `見本 ${targetPct}% : 本人 ${sourcePct}%`;
+  mixRatioVal.textContent = `見本 ${val}% : 本人 ${100 - val}%`;
 }
 
 async function pushSettings() {
-  const mixRatio = parseInt(sliderMixRatio.value, 10) / 100.0;
-  const enableGFPGAN = toggleGFPGAN.checked;
-  const enableFaceParser = toggleFaceParser.checked;
-  const sharpness = parseInt(sliderSharpness.value, 10) / 10.0;
-  const skinBlend = parseInt(sliderSkinBlend.value, 10) / 100.0;
-
   try {
     await fetch('/api/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        mix_ratio: mixRatio,
-        enable_gfpgan: enableGFPGAN,
-        enable_face_parser: enableFaceParser,
-        sharpness: sharpness,
-        skin_blend: skinBlend
+        mix_ratio: parseInt(sliderMixRatio.value, 10) / 100.0,
+        enable_gfpgan: toggleGFPGAN.checked,
+        enable_face_parser: toggleFaceParser.checked,
+        sharpness: parseInt(sliderSharpness.value, 10) / 10.0,
+        skin_blend: parseInt(sliderSkinBlend.value, 10) / 100.0
       })
     });
   } catch (err) {
@@ -150,243 +136,87 @@ sliderMixRatio.addEventListener('input', (e) => {
   updateMixRatioLabel(e.target.value);
   pushSettings();
 });
-
 toggleGFPGAN.addEventListener('change', pushSettings);
 toggleFaceParser.addEventListener('change', pushSettings);
-
 sliderSharpness.addEventListener('input', (e) => {
   sharpnessVal.textContent = `${(e.target.value / 10).toFixed(1)}x`;
   pushSettings();
 });
-
 sliderSkinBlend.addEventListener('input', (e) => {
   skinBlendVal.textContent = `${e.target.value}%`;
   pushSettings();
 });
 
-// --- カメラデバイスの検出・列挙 ---
+// --- カメラデバイスの検出 ---
 async function populateCameraDevices() {
-  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-    cameraSelect.innerHTML = '<option value="">カメラ検出非対応ブラウザ</option>';
-    return;
-  }
-
+  if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
     const videoDevices = devices.filter(d => d.kind === 'videoinput');
-
-    if (videoDevices.length === 0) {
-      cameraSelect.innerHTML = '<option value="">カメラが見つかりません</option>';
-      return;
-    }
+    if (videoDevices.length === 0) return;
 
     const currentVal = cameraSelect.value;
     cameraSelect.innerHTML = '';
-    
     videoDevices.forEach((dev, index) => {
-      const option = document.createElement('option');
-      option.value = dev.deviceId;
-      option.textContent = dev.label || `カメラ ${index + 1} (${dev.deviceId.slice(0, 5)}...)`;
-      cameraSelect.appendChild(option);
+      const opt = document.createElement('option');
+      opt.value = dev.deviceId;
+      opt.textContent = dev.label || `カメラ ${index + 1}`;
+      cameraSelect.appendChild(opt);
     });
-
     if (currentVal && Array.from(cameraSelect.options).some(o => o.value === currentVal)) {
       cameraSelect.value = currentVal;
     }
-  } catch (err) {
-    console.warn('カメラ一覧取得エラー:', err);
-    cameraSelect.innerHTML = '<option value="">デフォルトカメラ</option>';
-  }
+  } catch (e) {}
 }
 
-// 段階的解像度フォールバックによるカメラ取得
 async function getCameraStream(deviceId) {
-  const constraintsList = [
-    // 1. 指定デバイス 720p
-    {
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      },
-      audio: false
-    },
-    // 2. 指定デバイス 480p
-    {
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined,
-        width: { ideal: 640 },
-        height: { ideal: 480 }
-      },
-      audio: false
-    },
-    // 3. 指定デバイス 任意解像度
-    {
-      video: {
-        deviceId: deviceId ? { exact: deviceId } : undefined
-      },
-      audio: false
-    },
-    // 4. デフォルトカメラ (完全フォールバック)
-    {
-      video: true,
-      audio: false
-    }
+  const constraints = [
+    { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+    { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+    { video: true, audio: false }
   ];
-
-  let lastError = null;
-  for (const constraints of constraintsList) {
+  for (const c of constraints) {
     try {
-      console.log('[カメラ起動試行]', constraints);
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      return stream;
-    } catch (err) {
-      console.warn('[カメラ試行失敗]', constraints, err);
-      lastError = err;
-    }
+      return await navigator.mediaDevices.getUserMedia(c);
+    } catch (e) {}
   }
-
-  throw lastError || new Error('利用可能なカメラが見つかりませんでした');
+  throw new Error('利用可能なカメラが見つかりませんでした');
 }
 
-// --- リアルタイム・ストリーミング (WebSocket & WebRTC ハイブリッド) ---
+// --- リアルタイム ストリーミング (高速直接パイプライン) ---
 async function startStream() {
   btnStart.disabled = true;
   btnStart.textContent = '接続中...';
   setConnectionStatus('connecting', '接続中...');
 
   try {
-    const selectedDeviceId = cameraSelect.value || undefined;
-    
-    // 1. 段階的フォールバックでカメラ起動
-    localStream = await getCameraStream(selectedDeviceId);
+    localStream = await getCameraStream(cameraSelect.value || undefined);
     localVideo.srcObject = localStream;
-    await localVideo.play().catch(e => console.warn('localVideo play error:', e));
+    await localVideo.play();
     await populateCameraDevices();
 
     isStreaming = true;
     btnStart.textContent = '配信中';
     btnStop.disabled = false;
-    setConnectionStatus('connected', 'オンライン (接続完了)');
+    setConnectionStatus('connected', 'オンライン (RTX 4090)');
+    videoPlaceholder.classList.add('hidden');
 
-    // 2. WebSocket 高速ストリームの開始
-    startWebSocketStream();
-
-    // 3. 統計WebSocket開始
+    startStreamingLoop();
     connectStatsWebSocket();
-
-    // 4. WebRTC接続も並行試行
-    tryStartWebRTC();
   } catch (err) {
-    console.error('接続失敗:', err);
-    alert(`接続に失敗しました: ${err.message}\nブラウザのカメラ使用許可設定を確認してください。`);
+    console.error('起動エラー:', err);
+    alert(`接続失敗: ${err.message}`);
     stopStream();
   }
 }
 
-function startWebSocketStream() {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  streamWs = new WebSocket(`${protocol}//${window.location.host}/ws/stream`);
-  streamWs.binaryType = 'arraybuffer';
-
-  let waitingForResponse = false;
-  let lastSendTime = Date.now();
-  let wsFailed = false;
-
-  streamWs.onopen = () => {
-    console.log('[WebSocket Stream] 接続確立 - 映像送信ループ開始');
-    videoPlaceholder.classList.add('hidden');
-    const checkReady = () => {
-      if (!isStreaming) return;
-      if (localVideo.videoWidth > 0 && localVideo.videoHeight > 0) {
-        sendNextFrame();
-      } else {
-        setTimeout(checkReady, 50);
-      }
-    };
-    checkReady();
-  };
-
-  streamWs.onmessage = async (event) => {
-    waitingForResponse = false;
-    if (!isStreaming) return;
-
-    try {
-      const blob = new Blob([event.data], { type: 'image/jpeg' });
-      const imgBitmap = await createImageBitmap(blob);
-      
-      if (remoteCanvas.width !== imgBitmap.width || remoteCanvas.height !== imgBitmap.height) {
-        remoteCanvas.width = imgBitmap.width;
-        remoteCanvas.height = imgBitmap.height;
-      }
-      canvasCtx.drawImage(imgBitmap, 0, 0);
-      videoPlaceholder.classList.add('hidden');
-    } catch (e) {
-      console.warn('フレーム描画エラー:', e);
-    }
-
-    if (isStreaming) {
-      requestAnimationFrame(sendNextFrame);
-    }
-  };
-
-  streamWs.onerror = (e) => {
-    console.warn('[WebSocket Stream] エラー発生 ➔ HTTP直接ストリームへフォールバックします');
-    if (!wsFailed) {
-      wsFailed = true;
-      startHttpStreamLoop();
-    }
-  };
-
-  streamWs.onclose = () => {
-    console.log('[WebSocket Stream] 切断 ➔ HTTP直接ストリームへフォールバックします');
-    if (!wsFailed) {
-      wsFailed = true;
-      startHttpStreamLoop();
-    }
-  };
-
-  function sendNextFrame() {
-    if (!isStreaming || !localVideo.videoWidth || wsFailed) return;
-
-    if (waitingForResponse && (Date.now() - lastSendTime < 500)) {
-      return;
-    }
-
-    captureCanvas.width = localVideo.videoWidth;
-    captureCanvas.height = localVideo.videoHeight;
-    captureCtx.drawImage(localVideo, 0, 0);
-
-    waitingForResponse = true;
-    lastSendTime = Date.now();
-
-    captureCanvas.toBlob((blob) => {
-      if (blob && streamWs && streamWs.readyState === WebSocket.OPEN) {
-        blob.arrayBuffer().then(buf => streamWs.send(buf));
-      } else {
-        waitingForResponse = false;
-      }
-    }, 'image/jpeg', 0.75);
-  }
-}
-
-// プロキシ・ファイアウォール完全回避のHTTP POSTストリーミング
-let isHttpLoopRunning = false;
-async function startHttpStreamLoop() {
-  if (isHttpLoopRunning || !isStreaming) return;
-  isHttpLoopRunning = true;
-  console.log('[HTTP Stream] 安定直接ストリーミングループ開始');
-  videoPlaceholder.classList.add('hidden');
-
+function startStreamingLoop() {
   let inFlight = false;
   let frameCount = 0;
   let lastFpsCalc = Date.now();
 
   const loop = async () => {
-    if (!isStreaming) {
-      isHttpLoopRunning = false;
-      return;
-    }
+    if (!isStreaming) return;
 
     if (localVideo.videoWidth > 0 && !inFlight) {
       captureCanvas.width = localVideo.videoWidth;
@@ -405,11 +235,7 @@ async function startHttpStreamLoop() {
 
         const startTime = performance.now();
         try {
-          const res = await fetch('/api/process_frame', {
-            method: 'POST',
-            body: formData
-          });
-
+          const res = await fetch('/api/process_frame', { method: 'POST', body: formData });
           if (res.ok) {
             const respBlob = await res.blob();
             const imgBitmap = await createImageBitmap(respBlob);
@@ -419,7 +245,7 @@ async function startHttpStreamLoop() {
             }
             canvasCtx.drawImage(imgBitmap, 0, 0);
 
-            // FPS・遅延の計算とUI更新
+            // FPS・遅延の計算
             const latency = Math.round(performance.now() - startTime);
             statLatency.textContent = `${latency} ms`;
             frameCount++;
@@ -430,67 +256,23 @@ async function startHttpStreamLoop() {
               lastFpsCalc = now;
             }
           }
-        } catch (err) {
-          console.warn('[HTTP Stream] 通信エラー:', err);
+        } catch (e) {
+          console.warn('フレーム通信エラー:', e);
         } finally {
           inFlight = false;
-          if (isStreaming) {
-            requestAnimationFrame(loop);
-          }
+          if (isStreaming) requestAnimationFrame(loop);
         }
-      }, 'image/jpeg', 0.75);
+      }, 'image/jpeg', 0.80);
     } else {
-      if (isStreaming) {
-        requestAnimationFrame(loop);
-      }
+      if (isStreaming) requestAnimationFrame(loop);
     }
   };
 
   requestAnimationFrame(loop);
 }
 
-async function tryStartWebRTC() {
-  try {
-    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
-    pc = new RTCPeerConnection(config);
-
-    pc.ontrack = (event) => {
-      if (event.track.kind === 'video') {
-        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
-        remoteVideo.srcObject = stream;
-        remoteVideo.play().catch(() => {});
-      }
-    };
-
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    const response = await fetch('/offer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type })
-    });
-
-    if (response.ok) {
-      const answer = await response.json();
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    }
-  } catch (e) {
-    console.log('[WebRTC] オプション接続スキップ (WebSocketで継続):', e.message);
-  }
-}
-
 function stopStream() {
   isStreaming = false;
-  if (streamWs) {
-    streamWs.close();
-    streamWs = null;
-  }
-  if (pc) {
-    pc.close();
-    pc = null;
-  }
   if (localStream) {
     localStream.getTracks().forEach(t => t.stop());
     localStream = null;
@@ -500,11 +282,8 @@ function stopStream() {
     statsWs = null;
   }
 
-  remoteVideo.srcObject = null;
   localVideo.srcObject = null;
-  if (canvasCtx) {
-    canvasCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
-  }
+  canvasCtx.clearRect(0, 0, remoteCanvas.width, remoteCanvas.height);
   videoPlaceholder.classList.remove('hidden');
 
   btnStart.disabled = false;
@@ -527,19 +306,13 @@ function setConnectionStatus(state, text) {
   connectionStatus.querySelector('.status-text').textContent = text;
 }
 
-// 統計WebSocket
 function connectStatsWebSocket() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   statsWs = new WebSocket(`${protocol}//${window.location.host}/ws/stats`);
-
   statsWs.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
-      if (data.stats) {
-        statLatency.textContent = `${data.stats.latency_ms} ms`;
-        statFPS.textContent = `${data.stats.fps}`;
-        statFaces.textContent = `${data.stats.faces_detected}`;
-      }
+      if (data.stats) statFaces.textContent = `${data.stats.faces_detected}`;
     } catch (e) {}
   };
 }
@@ -549,14 +322,12 @@ btnToggleSource.addEventListener('click', () => {
   isShowingLocal = !isShowingLocal;
   if (isShowingLocal) {
     localVideo.classList.remove('hidden');
-    remoteVideo.classList.add('hidden');
-    if (remoteCanvas) remoteCanvas.classList.add('hidden');
+    remoteCanvas.classList.add('hidden');
     viewModeBadge.textContent = 'カメラ元映像 (オリジナル)';
     btnToggleSource.textContent = 'AI変換後に戻す';
   } else {
     localVideo.classList.add('hidden');
-    remoteVideo.classList.remove('hidden');
-    if (remoteCanvas) remoteCanvas.classList.remove('hidden');
+    remoteCanvas.classList.remove('hidden');
     viewModeBadge.textContent = 'AI 変換後プレビュー';
     btnToggleSource.textContent = '元映像と比較';
   }
@@ -569,8 +340,6 @@ btnStop.addEventListener('click', stopStream);
 fetchTargets();
 updateMixRatioLabel(sliderMixRatio.value);
 populateCameraDevices();
-
-// デバイスの接続/切断イベントを検知して更新
 if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', populateCameraDevices);
 }

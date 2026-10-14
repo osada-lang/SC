@@ -1,15 +1,5 @@
 import os
 import sys
-
-# --- Python 3.12 / skimage 互換性完全パッチ ---
-try:
-    import skimage.transform
-    from skimage.transform._geometric import SimilarityTransform
-    skimage.transform.SimilarityTransform = SimilarityTransform
-    setattr(sys.modules['skimage.transform'], 'SimilarityTransform', SimilarityTransform)
-except Exception as e:
-    pass
-
 import json
 import asyncio
 import uuid
@@ -37,7 +27,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 os.makedirs(TARGETS_DIR, exist_ok=True)
 os.makedirs(STATIC_DIR, exist_ok=True)
 
-# デフォルトターゲットの初期設定
+# デフォルトターゲット初期化
 default_target = os.path.join(PROJECT_ROOT, "target.jpg")
 if os.path.exists(default_target) and not os.path.exists(os.path.join(TARGETS_DIR, "default.jpg")):
     shutil.copy(default_target, os.path.join(TARGETS_DIR, "default.jpg"))
@@ -48,7 +38,7 @@ pipeline = AIFaceSwapPipeline(
     default_target_path=os.path.join(TARGETS_DIR, "default.jpg") if os.path.exists(os.path.join(TARGETS_DIR, "default.jpg")) else None
 )
 
-# 保存されている既存のターゲット画像をロード
+# 登録ターゲット画像の自動読み込み
 for filename in os.listdir(TARGETS_DIR):
     if filename.lower().endswith(('.jpg', '.jpeg', '.png')):
         tid = os.path.splitext(filename)[0]
@@ -65,16 +55,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 静的ファイル配信
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/targets", StaticFiles(directory=TARGETS_DIR), name="targets")
 
 pcs = set()
 relay = MediaRelay()
-connected_websockets = set()
 latest_meta = {"fps": 0, "latency_ms": 0, "faces_detected": 0}
 
-# WebRTC STUN 設定 (NAT越え・クラウド接続用)
+# WebRTC STUN 設定
 RTC_CONFIG = RTCConfiguration(
     iceServers=[
         RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
@@ -83,19 +71,15 @@ RTC_CONFIG = RTCConfiguration(
 )
 
 class FaceSwapVideoTrack(VideoStreamTrack):
-    """
-    WebRTC受信映像からリアルタイムでAI顔交換処理を行い、クライアントに返送するカスタムトラック
-    """
     def __init__(self, track):
         super().__init__()
         self.track = track
 
     async def recv(self):
         global latest_meta
-        # 1. クライアントから映像フレームを受信
         frame = await self.track.recv()
 
-        # 2. 超低遅延化: キューに溜まった古い未処理フレームをすべてスキップして破棄
+        # 最新フレーム以外を破棄して遅延を最小化
         while True:
             try:
                 next_frame = await asyncio.wait_for(self.track.recv(), timeout=0.0001)
@@ -104,17 +88,10 @@ class FaceSwapVideoTrack(VideoStreamTrack):
                 break
 
         img = frame.to_ndarray(format="bgr24")
-
-        # 3. 別スレッドでAI処理を実行（WebRTCイベントループのブロッキングを完全防止）
         loop = asyncio.get_event_loop()
-        processed_img, meta = await loop.run_in_executor(
-            None,
-            pipeline.process_frame,
-            img
-        )
+        processed_img, meta = await loop.run_in_executor(None, pipeline.process_frame, img)
         latest_meta = meta
 
-        # 4. 処理済みフレームをWebRTCの出力として返す (Safari互換タイムスタンプ)
         pts, time_base = await self.next_timestamp()
         new_frame = av.VideoFrame.from_ndarray(processed_img, format="bgr24")
         new_frame.pts = pts
@@ -126,25 +103,44 @@ async def get_index():
     index_path = os.path.join(STATIC_DIR, "index.html")
     if os.path.exists(index_path):
         return FileResponse(index_path)
-    return HTMLResponse("<h2>LiveChat Face Swap Server is running.</h2><p>Static UI not found.</p>")
+    return HTMLResponse("<h2>LiveChat AI Server Running</h2>")
 
+# 1. リアルタイム高速フレーム処理エンドポイント (HTTP直接ストリーム)
+@app.post("/api/process_frame")
+async def api_process_frame(file: UploadFile = File(...)):
+    global latest_meta
+    try:
+        contents = await file.read()
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None:
+            raise HTTPException(status_code=400, detail="Invalid frame")
+
+        loop = asyncio.get_event_loop()
+        processed_img, meta = await loop.run_in_executor(None, pipeline.process_frame, img)
+        latest_meta = meta
+
+        _, enc_img = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        return Response(content=enc_img.tobytes(), media_type="image/jpeg")
+    except Exception as e:
+        print(f"[API Process Error] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 2. WebRTC シグナリング
 @app.post("/offer")
 async def rtc_offer(params: dict):
-    """WebRTC 接続確立用エンドポイント"""
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
     pc = RTCPeerConnection(configuration=RTC_CONFIG)
     pcs.add(pc)
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        print(f"[WebRTC] 接続状態: {pc.connectionState}")
         if pc.connectionState in ["failed", "closed"]:
             await pc.close()
             pcs.discard(pc)
 
     @pc.on("track")
     def on_track(track):
-        print(f"[WebRTC] トラック受信: {track.kind}")
         if track.kind == "video":
             pc.addTrack(FaceSwapVideoTrack(relay.subscribe(track)))
 
@@ -152,22 +148,17 @@ async def rtc_offer(params: dict):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    return JSONResponse({
-        "sdp": pc.localDescription.sdp,
-        "type": pc.localDescription.type
-    })
+    return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
 
+# 3. 設定 & ターゲット管理 API
 @app.get("/api/status")
 async def api_status():
-    """現在のサーバー状態・設定・統計情報を取得"""
     status = pipeline.get_status()
     status["stats"] = latest_meta
-    status["active_peer_connections"] = len(pcs)
     return JSONResponse(status)
 
 @app.post("/api/settings")
 async def api_settings(settings: dict):
-    """リアルタイムパラメータの更新"""
     pipeline.set_parameters(
         mix_ratio=settings.get("mix_ratio"),
         enable_gfpgan=settings.get("enable_gfpgan"),
@@ -179,136 +170,49 @@ async def api_settings(settings: dict):
 
 @app.get("/api/targets")
 async def api_get_targets():
-    """登録されているターゲット画像一覧を返却"""
-    targets = []
-    for tid, info in pipeline.targets.items():
-        targets.append({
-            "id": tid,
-            "url": f"/targets/{os.path.basename(info['image_path'])}",
-            "is_active": (tid == pipeline.current_target_id)
-        })
+    targets = [
+        {"id": tid, "url": f"/targets/{os.path.basename(info['image_path'])}", "is_active": (tid == pipeline.current_target_id)}
+        for tid, info in pipeline.targets.items()
+    ]
     return JSONResponse({"targets": targets, "current_target_id": pipeline.current_target_id})
 
 @app.post("/api/targets/select")
 async def api_select_target(data: dict):
-    """アクティブなターゲット画像の切り替え"""
     target_id = data.get("target_id")
     if target_id not in pipeline.targets:
         raise HTTPException(status_code=404, detail="Target ID not found")
-    
     pipeline.current_target_id = target_id
     pipeline.current_target_face = pipeline.targets[target_id]["face"]
     return JSONResponse({"status": "ok", "current_target_id": target_id})
 
 @app.post("/api/targets/upload")
 async def api_upload_target(file: UploadFile = File(...), name: Optional[str] = Form(None)):
-    """新しいターゲット画像のアップロードと顔特徴量抽出"""
-    file_ext = os.path.splitext(file.filename)[1].lower()
-    if file_ext not in [".jpg", ".jpeg", ".png"]:
-        raise HTTPException(status_code=400, detail="Only JPG and PNG images are supported")
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in [".jpg", ".jpeg", ".png"]:
+        raise HTTPException(status_code=400, detail="Only JPG/PNG supported")
     
-    target_id = name.strip() if name and name.strip() else f"target_{uuid.uuid4().hex[:8]}"
-    target_filename = f"{target_id}{file_ext}"
-    target_path = os.path.join(TARGETS_DIR, target_filename)
+    tid = name.strip() if name and name.strip() else f"target_{uuid.uuid4().hex[:8]}"
+    target_path = os.path.join(TARGETS_DIR, f"{tid}{ext}")
 
     with open(target_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    success = pipeline.set_target_from_file(target_id, target_path)
-    if not success:
+    if not pipeline.set_target_from_file(tid, target_path):
         if os.path.exists(target_path):
             os.remove(target_path)
-        raise HTTPException(status_code=400, detail="Face not detected in uploaded image")
+        raise HTTPException(status_code=400, detail="Face not detected")
 
-    return JSONResponse({
-        "status": "ok",
-        "target_id": target_id,
-        "url": f"/targets/{target_filename}"
-    })
-
-@app.post("/api/process_frame")
-async def api_process_frame(file: UploadFile = File(...)):
-    """
-    HTTP POSTによる直接フレーム処理 (WebSocket切断時やプロキシ環境用の超堅牢フォールバック)
-    """
-    global latest_meta
-    contents = await file.read()
-    nparr = np.frombuffer(contents, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    if img is None:
-        raise HTTPException(status_code=400, detail="Invalid image frame")
-
-    loop = asyncio.get_event_loop()
-    processed_img, meta = await loop.run_in_executor(
-        None,
-        pipeline.process_frame,
-        img
-    )
-    latest_meta = meta
-
-    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
-    _, enc_img = cv2.imencode('.jpg', processed_img, encode_param)
-
-    return Response(content=enc_img.tobytes(), media_type="image/jpeg")
-
-@app.websocket("/ws/stream")
-async def websocket_stream(websocket: WebSocket):
-    """
-    RunPodプロキシ等、UDP/WebRTCが遮断される環境向けの高速WebSocketバイナリストリーミング
-    """
-    global latest_meta
-    await websocket.accept()
-    loop = asyncio.get_event_loop()
-    print("[WebSocket Stream] クライアント接続確立")
-
-    try:
-        while True:
-            # 1. クライアントからJPEGバイナリを受信
-            data = await websocket.receive_bytes()
-            if not data:
-                continue
-
-            # 2. デコード
-            nparr = np.frombuffer(data, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is None:
-                continue
-
-            # 3. 別スレッドで高速AI処理
-            processed_img, meta = await loop.run_in_executor(
-                None,
-                pipeline.process_frame,
-                img
-            )
-            latest_meta = meta
-
-            # 4. 高速JPEGエンコード & 返送
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 82]
-            _, enc_img = cv2.imencode('.jpg', processed_img, encode_param)
-            
-            await websocket.send_bytes(enc_img.tobytes())
-    except WebSocketDisconnect:
-        print("[WebSocket Stream] クライアント切断")
-    except Exception as e:
-        print(f"[WebSocket Stream] エラー: {e}")
+    return JSONResponse({"status": "ok", "target_id": tid, "url": f"/targets/{tid}{ext}"})
 
 @app.websocket("/ws/stats")
 async def websocket_stats(websocket: WebSocket):
-    """リアルタイムで統計情報(FPS/Latency)をWeb UIにブロードキャスト"""
     await websocket.accept()
-    connected_websockets.add(websocket)
     try:
         while True:
-            data = {
-                "stats": latest_meta,
-                "status": pipeline.get_status()
-            }
-            await websocket.send_json(data)
+            await websocket.send_json({"stats": latest_meta, "status": pipeline.get_status()})
             await asyncio.sleep(0.2)
-    except WebSocketDisconnect:
-        connected_websockets.discard(websocket)
     except Exception:
-        connected_websockets.discard(websocket)
+        pass
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -321,6 +225,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     host = os.environ.get("HOST", "0.0.0.0")
     print(f"==================================================")
-    print(f"  LiveChat AI Server 起動中: http://{host}:{port}")
+    print(f"  LiveChat AI Server Running: http://{host}:{port}")
     print(f"==================================================")
     uvicorn.run("app:app", host=host, port=port, reload=False)
