@@ -268,7 +268,9 @@ async function startStream() {
     pc.ontrack = (event) => {
       console.log('[WebRTC] サーバーから処理済みトラックを受信:', event.track.kind);
       if (event.track.kind === 'video') {
-        remoteVideo.srcObject = event.streams[0];
+        const stream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+        remoteVideo.srcObject = stream;
+        remoteVideo.play().catch(e => console.warn('Autoplay play error:', e));
         videoPlaceholder.classList.add('hidden');
       }
     };

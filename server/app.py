@@ -114,10 +114,11 @@ class FaceSwapVideoTrack(VideoStreamTrack):
         )
         latest_meta = meta
 
-        # 4. 処理済みフレームをWebRTCの出力として返す
+        # 4. 処理済みフレームをWebRTCの出力として返す (Safari互換タイムスタンプ)
+        pts, time_base = await self.next_timestamp()
         new_frame = av.VideoFrame.from_ndarray(processed_img, format="bgr24")
-        new_frame.pts = frame.pts
-        new_frame.time_base = frame.time_base
+        new_frame.pts = pts
+        new_frame.time_base = time_base
         return new_frame
 
 @app.get("/", response_class=HTMLResponse)
