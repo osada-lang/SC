@@ -100,7 +100,7 @@ class AIFaceSwapPipeline:
         # 1. 顔検出モデル (FaceAnalysis)
         print("[AI Pipeline] FaceAnalysis を初期化中...")
         self.app = FaceAnalysis(name="buffalo_l", allowed_modules=['detection', 'landmark_2d_106', 'recognition'])
-        self.app.prepare(ctx_id=0, det_size=(640, 640))
+        self.app.prepare(ctx_id=0, det_size=(320, 320))
 
         # 2. 顔交換モデル (Inswapper)
         inswapper_path = os.path.join(models_dir, "inswapper_128.onnx")

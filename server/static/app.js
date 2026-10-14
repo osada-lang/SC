@@ -219,9 +219,13 @@ function startStreamingLoop() {
     if (!isStreaming) return;
 
     if (localVideo.videoWidth > 0 && !inFlight) {
-      captureCanvas.width = localVideo.videoWidth;
-      captureCanvas.height = localVideo.videoHeight;
-      captureCtx.drawImage(localVideo, 0, 0);
+      // 送信解像度を 854x480 (16:9) に最適化スケーリング (超低遅延・高応答化)
+      const targetW = 854;
+      const targetH = Math.round(targetW * (localVideo.videoHeight / localVideo.videoWidth));
+      
+      captureCanvas.width = targetW;
+      captureCanvas.height = targetH;
+      captureCtx.drawImage(localVideo, 0, 0, targetW, targetH);
 
       inFlight = true;
       captureCanvas.toBlob(async (blob) => {
@@ -262,7 +266,7 @@ function startStreamingLoop() {
           inFlight = false;
           if (isStreaming) requestAnimationFrame(loop);
         }
-      }, 'image/jpeg', 0.80);
+      }, 'image/jpeg', 0.70);
     } else {
       if (isStreaming) requestAnimationFrame(loop);
     }
