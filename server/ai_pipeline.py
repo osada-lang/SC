@@ -301,7 +301,7 @@ class AIFaceSwapPipeline:
 
     def _detect_hand_mask_mediapipe(self, frame: np.ndarray) -> np.ndarray:
         """
-        MediaPipe Hands 手の骨格ポリゴンマスク (カメレオンAIと同等)
+        MediaPipe Hands による手の21点骨格ポリゴン＆指先完全保護マスク (カメレオンAIと同等)
         """
         h, w = frame.shape[:2]
         if self.mp_hands is None:
@@ -322,6 +322,7 @@ class AIFaceSwapPipeline:
                     px = int(lm.x * w)
                     py = int(lm.y * h)
                     pts.append([px, py])
+                    cv2.circle(mask, (px, py), int(w * 0.025), 255, -1)
                 
                 pts = np.array(pts, dtype=np.int32)
                 hull = cv2.convexHull(pts)
@@ -331,13 +332,13 @@ class AIFaceSwapPipeline:
                 for conn in connections:
                     pt1 = pts[conn[0]]
                     pt2 = pts[conn[1]]
-                    cv2.line(mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.04))
+                    cv2.line(mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.055))
 
-            mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=1)
+            mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), iterations=1)
             mask_blur = cv2.GaussianBlur(mask, (15, 15), 0)
             return (mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
         except Exception:
-            return np.zeros((h, w), dtype=np.float32)
+            return np.zeros((h, w, 1), dtype=np.float32)
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
