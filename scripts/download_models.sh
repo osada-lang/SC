@@ -30,4 +30,12 @@ else
     echo "face_parser.onnx is ready."
 fi
 
+# 4. MediaPipe Hand Landmarker (手の骨格・オクルージョン検出 約11MB)
+if [ ! -s "models/hand_landmarker.task" ]; then
+    echo "Downloading hand_landmarker.task..."
+    curl -L -o models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task || true
+else
+    echo "hand_landmarker.task is ready."
+fi
+
 echo "=== すべてのAIモデルが正常に準備完了しました ==="

@@ -275,6 +275,30 @@ class AIFaceSwapPipeline:
         warped_mask = cv2.warpAffine(mask_template, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         warped_mask = np.expand_dims(warped_mask, axis=-1)
 
+        # 9. 手・異物のオクルージョン保護 (顔の前に手が出た時の透け・顔崩れ完全防止)
+        bbox = face.bbox.astype(int)
+        x1, y1 = max(0, bbox[0]), max(0, bbox[1])
+        x2, y2 = min(w, bbox[2]), min(h, bbox[3])
+        if (x2 - x1) > 0 and (y2 - y1) > 0:
+            face_roi = img[y1:y2, x1:x2]
+            gray_roi = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray_roi, 50, 150)
+            
+            hsv = cv2.cvtColor(face_roi, cv2.COLOR_BGR2HSV)
+            skin_mask = cv2.inRange(hsv, np.array([0, 25, 50], dtype=np.uint8), np.array([25, 170, 255], dtype=np.uint8))
+            
+            # 手・指のエッジと皮膚の交差領域を抽出
+            hand_edges = cv2.bitwise_and(skin_mask, edges)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+            hand_mask = cv2.morphologyEx(hand_edges, cv2.MORPH_CLOSE, kernel)
+            hand_mask = cv2.dilate(hand_mask, kernel, iterations=2)
+            hand_mask_blur = cv2.GaussianBlur(hand_mask, (11, 11), 0)
+            
+            # 手のマスクがある部分の warped_mask を弱めて元映像（手）を最前面に残す
+            full_hand_mask = np.zeros((h, w, 1), dtype=np.float32)
+            full_hand_mask[y1:y2, x1:x2, 0] = (hand_mask_blur / 255.0) * 0.85
+            warped_mask = np.clip(warped_mask * (1.0 - full_hand_mask), 0.0, 1.0)
+
         result = (img.astype(np.float32) * (1.0 - warped_mask) + warped_swapped.astype(np.float32) * warped_mask).astype(np.uint8)
         return result
 
