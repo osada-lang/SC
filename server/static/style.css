@@ -275,6 +275,12 @@ body {
   transition: all 0.2s ease;
 }
 
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  border-radius: var(--radius-sm);
+}
+
 .btn-primary {
   background-color: var(--accent-color);
   color: white;

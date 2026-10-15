@@ -235,6 +235,16 @@ async def api_upload_target(file: UploadFile = File(...), name: Optional[str] = 
 
     return JSONResponse({"status": "ok", "target_id": tid, "url": f"/targets/{tid}{ext}"})
 
+@app.post("/api/shutdown_server")
+async def api_shutdown_server():
+    """アプリ終了時にEC2サーバーを自動停止して課金を止めるエンドポイント"""
+    print("[サーバー] アプリ終了指示を受信: 5秒後にEC2インスタンスを自動停止します...")
+    async def delayed_shutdown():
+        await asyncio.sleep(3)
+        os.system("sudo shutdown -h now")
+    asyncio.create_task(delayed_shutdown())
+    return JSONResponse({"status": "shutting_down", "message": "Server will stop in 3 seconds"})
+
 @app.websocket("/ws/stats")
 async def websocket_stats(websocket: WebSocket):
     await websocket.accept()

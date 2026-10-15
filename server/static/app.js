@@ -11,6 +11,7 @@ const viewModeBadge = document.getElementById('viewModeBadge');
 const btnStart = document.getElementById('btnStart');
 const btnStop = document.getElementById('btnStop');
 const btnToggleSource = document.getElementById('btnToggleSource');
+const btnShutdown = document.getElementById('btnShutdown');
 const cameraSelect = document.getElementById('cameraSelect');
 
 const connectionStatus = document.getElementById('connectionStatus');
@@ -441,6 +442,20 @@ btnToggleSource.addEventListener('click', () => {
 
 btnStart.addEventListener('click', startStream);
 btnStop.addEventListener('click', stopStream);
+
+if (btnShutdown) {
+  btnShutdown.addEventListener('click', async () => {
+    if (!confirm('配信を終了し、サーバーを停止して課金を止めますか？\n（再度使う時はAWS管理画面から起動できます）')) return;
+    
+    btnShutdown.disabled = true;
+    btnShutdown.textContent = '停止中...';
+    try {
+      await fetch('/api/shutdown_server', { method: 'POST' });
+    } catch (e) {}
+    alert('サーバーの停止処理を開始しました。\n課金は数秒以内に停止します。アプリを終了します。');
+    window.close();
+  });
+}
 
 // 初期化
 fetchTargets();
