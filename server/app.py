@@ -193,7 +193,9 @@ async def api_settings(settings: dict):
         enable_gfpgan=settings.get("enable_gfpgan"),
         enable_face_parser=settings.get("enable_face_parser"),
         sharpness=settings.get("sharpness"),
-        skin_blend=settings.get("skin_blend")
+        skin_blend=settings.get("skin_blend"),
+        beauty_smooth=settings.get("beauty_smooth"),
+        beauty_whitening=settings.get("beauty_whitening")
     )
     return JSONResponse({"status": "ok", "current": pipeline.get_status()})
 

@@ -41,6 +41,8 @@ class AIFaceSwapPipeline:
         self.enable_gfpgan = False     # GFPGAN超解像
         self.sharpness = 1.4           # アンシャープマスク強度
         self.skin_blend = 0.15         # 元の肌の馴染ませ率
+        self.beauty_smooth = 0.60      # 美肌スムージング (0.0〜1.0: 陶器肌)
+        self.beauty_whitening = 0.20   # トーンアップ美白 (0.0〜1.0)
 
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 4
@@ -131,7 +133,7 @@ class AIFaceSwapPipeline:
         self.current_target_face = target_face
         return True
 
-    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, enable_face_parser=None, sharpness=None, skin_blend=None):
+    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, enable_face_parser=None, sharpness=None, skin_blend=None, beauty_smooth=None, beauty_whitening=None):
         if mix_ratio is not None:
             self.mix_ratio = float(np.clip(mix_ratio, 0.0, 1.0))
         if enable_gfpgan is not None:
@@ -142,6 +144,10 @@ class AIFaceSwapPipeline:
             self.sharpness = float(np.clip(sharpness, 0.0, 3.0))
         if skin_blend is not None:
             self.skin_blend = float(np.clip(skin_blend, 0.0, 1.0))
+        if beauty_smooth is not None:
+            self.beauty_smooth = float(np.clip(beauty_smooth, 0.0, 1.0))
+        if beauty_whitening is not None:
+            self.beauty_whitening = float(np.clip(beauty_whitening, 0.0, 1.0))
 
     def get_status(self):
         return {
@@ -152,6 +158,8 @@ class AIFaceSwapPipeline:
             "enable_face_parser": self.enable_face_parser and (self.parser_session is not None),
             "sharpness": self.sharpness,
             "skin_blend": self.skin_blend,
+            "beauty_smooth": self.beauty_smooth,
+            "beauty_whitening": self.beauty_whitening,
             "providers": self.providers
         }
 
@@ -191,9 +199,21 @@ class AIFaceSwapPipeline:
         pred_img = np.clip(pred_img * 255.0, 0, 255).astype(np.uint8)
         pred_bgr = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
 
-        # 7. スキンブレンド & シャープネス
+        # 7. スキンブレンド & 美肌スムージング (陶器肌フィルター)
         if self.skin_blend > 0:
             pred_bgr = cv2.addWeighted(crop_img, self.skin_blend, pred_bgr, 1.0 - self.skin_blend, 0)
+
+        # エッジ保存美肌スムージング (目や鼻筋のクッキリ感を残したまま毛穴・くすみを滑らかに)
+        if self.beauty_smooth > 0:
+            smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=50, sigmaSpace=50)
+            pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth, smoothed, self.beauty_smooth, 0)
+
+        # トーンアップ美白
+        if self.beauty_whitening > 0:
+            hsv = cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.20), 0, 255)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 - self.beauty_whitening * 0.15), 0, 255)
+            pred_bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
         if self.sharpness > 1.0:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)

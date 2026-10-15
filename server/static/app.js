@@ -26,6 +26,10 @@ const sliderMixRatio = document.getElementById('sliderMixRatio');
 const mixRatioVal = document.getElementById('mixRatioVal');
 const toggleGFPGAN = document.getElementById('toggleGFPGAN');
 const toggleFaceParser = document.getElementById('toggleFaceParser');
+const sliderBeautySmooth = document.getElementById('sliderBeautySmooth');
+const beautySmoothVal = document.getElementById('beautySmoothVal');
+const sliderBeautyWhitening = document.getElementById('sliderBeautyWhitening');
+const beautyWhiteningVal = document.getElementById('beautyWhiteningVal');
 const sliderSharpness = document.getElementById('sliderSharpness');
 const sharpnessVal = document.getElementById('sharpnessVal');
 const sliderSkinBlend = document.getElementById('sliderSkinBlend');
@@ -124,7 +128,9 @@ async function pushSettings() {
         enable_gfpgan: toggleGFPGAN.checked,
         enable_face_parser: toggleFaceParser.checked,
         sharpness: parseInt(sliderSharpness.value, 10) / 10.0,
-        skin_blend: parseInt(sliderSkinBlend.value, 10) / 100.0
+        skin_blend: parseInt(sliderSkinBlend.value, 10) / 100.0,
+        beauty_smooth: parseInt(sliderBeautySmooth.value, 10) / 100.0,
+        beauty_whitening: parseInt(sliderBeautyWhitening.value, 10) / 100.0
       })
     });
   } catch (err) {
@@ -138,6 +144,14 @@ sliderMixRatio.addEventListener('input', (e) => {
 });
 toggleGFPGAN.addEventListener('change', pushSettings);
 toggleFaceParser.addEventListener('change', pushSettings);
+sliderBeautySmooth.addEventListener('input', (e) => {
+  beautySmoothVal.textContent = `${e.target.value}%`;
+  pushSettings();
+});
+sliderBeautyWhitening.addEventListener('input', (e) => {
+  beautyWhiteningVal.textContent = `${e.target.value}%`;
+  pushSettings();
+});
 sliderSharpness.addEventListener('input', (e) => {
   sharpnessVal.textContent = `${(e.target.value / 10).toFixed(1)}x`;
   pushSettings();
