@@ -9,7 +9,7 @@ import insightface
 from insightface.app import FaceAnalysis
 
 # =====================================================================
-# ArcFace 128x128 基準ランドマーク (Inswapper標準)
+# ArcFace 基準ランドマーク (Inswapper 128px & GFPGAN 512px)
 # =====================================================================
 ARCFACE_DST_128 = np.array([
     [38.2946, 51.6963],
@@ -19,16 +19,24 @@ ARCFACE_DST_128 = np.array([
     [70.7299, 92.2041]
 ], dtype=np.float32)
 
+ARCFACE_DST_512 = ARCFACE_DST_128 * 4.0
+
 # マスク用楕円テンプレート (128x128)
 MASK_128 = np.zeros((128, 128), dtype=np.float32)
 cv2.ellipse(MASK_128, (64, 68), (48, 60), 0, 0, 360, 1.0, -1)
 MASK_128 = cv2.GaussianBlur(MASK_128, (19, 19), 0)
 MASK_128 = np.expand_dims(MASK_128, axis=-1)
 
+# マスク用高精細楕円テンプレート (512x512)
+MASK_512 = np.zeros((512, 512), dtype=np.float32)
+cv2.ellipse(MASK_512, (256, 272), (192, 240), 0, 0, 360, 1.0, -1)
+MASK_512 = cv2.GaussianBlur(MASK_512, (35, 35), 0)
+MASK_512 = np.expand_dims(MASK_512, axis=-1)
+
 
 class AIFaceSwapPipeline:
     """
-    リアルタイム顔交換・顔ブレンド・手マスク・高画質化を司る統合AIパイプライン (Direct ONNX 完全独立版)
+    リアルタイム顔交換・顔ブレンド・GFPGAN超解像・美肌スムージング統合パイプライン
     """
     def __init__(self, models_dir="models", default_target_path=None):
         self.models_dir = models_dir
@@ -38,8 +46,8 @@ class AIFaceSwapPipeline:
         # リアルタイム調整パラメータ
         self.mix_ratio = 0.70          # 0.0(本人100%) 〜 1.0(見本100%)
         self.enable_face_parser = False # 手・異物の透過防止マスク
-        self.enable_gfpgan = False     # GFPGAN超解像
-        self.sharpness = 1.4           # アンシャープマスク強度
+        self.enable_gfpgan = True      # GFPGAN超解像 (デフォルトONで最高画質)
+        self.sharpness = 1.3           # アンシャープマスク強度
         self.skin_blend = 0.15         # 元の肌の馴染ませ率
         self.beauty_smooth = 0.60      # 美肌スムージング (0.0〜1.0: 陶器肌)
         self.beauty_whitening = 0.20   # トーンアップ美白 (0.0〜1.0)
@@ -59,15 +67,13 @@ class AIFaceSwapPipeline:
             raise FileNotFoundError(f"モデルが見つかりません: {inswapper_path}")
         
         print("[AI Pipeline] Inswapper ONNX セッションを初期化中...")
-        self.swapper_session = ort.InferenceSession(inswapper_path, providers=self.providers, sess_opts=sess_opts)
+        self.swapper_session = ort.InferenceSession(inswapper_path, providers=self.providers, sess_options=sess_opts)
         
-        # モデルの入力・出力名を取得
         inputs = self.swapper_session.get_inputs()
-        self.input_target_name = inputs[0].name # 'target' (1, 3, 128, 128)
-        self.input_source_name = inputs[1].name # 'source' (1, 512)
+        self.input_target_name = inputs[0].name
+        self.input_source_name = inputs[1].name
         
-        # Inswapper内部の E-map (特徴量マッピング行列) を取得 (512x512)
-        # onnxモデルのinitializerからemapを取得
+        # Inswapper E-map 行列取得
         self.emap = None
         try:
             import onnx
@@ -80,7 +86,19 @@ class AIFaceSwapPipeline:
         except Exception as e:
             print(f"[AI Pipeline] emap 自動抽出警告: {e}")
 
-        # 3. 顔・手セグメンテーションモデル (FaceParser)
+        # 3. GFPGAN v1.4 超解像・目元高画質化モデル (512px)
+        gfpgan_path = os.path.join(models_dir, "GFPGANv1.4.onnx")
+        self.gfpgan_session = None
+        if os.path.exists(gfpgan_path):
+            try:
+                print(f"[AI Pipeline] GFPGAN v1.4 超解像モデルをロード中 ({gfpgan_path})...")
+                self.gfpgan_session = ort.InferenceSession(gfpgan_path, providers=self.providers, sess_options=sess_opts)
+                self.gfpgan_input_name = self.gfpgan_session.get_inputs()[0].name
+                print("[AI Pipeline] GFPGAN v1.4 超解像エンジン準備完了 (512px)")
+            except Exception as e:
+                print(f"[AI Pipeline] GFPGAN 初期化警告: {e}")
+
+        # 4. 顔・手セグメンテーションモデル (FaceParser)
         parser_path = os.path.join(models_dir, "face_parser.onnx")
         self.parser_session = None
         if os.path.exists(parser_path):
@@ -100,7 +118,7 @@ class AIFaceSwapPipeline:
             self.set_target_from_file("default", default_target_path)
 
         self.last_frame_time = time.time()
-        print("[AI Pipeline] パイプライン準備完了 (Direct ONNX 稼働)")
+        print("[AI Pipeline] パイプライン準備完了 (GFPGAN 512px 高精細モード稼働)")
 
     def _get_optimal_providers(self):
         available = ort.get_available_providers()
@@ -113,7 +131,6 @@ class AIFaceSwapPipeline:
         return providers
 
     def set_target_from_file(self, target_id: str, image_path: str) -> bool:
-        """ターゲット画像を読み込み、顔特徴量を抽出して登録"""
         img = cv2.imread(image_path)
         if img is None:
             return False
@@ -154,7 +171,7 @@ class AIFaceSwapPipeline:
             "current_target_id": self.current_target_id,
             "available_targets": list(self.targets.keys()),
             "mix_ratio": self.mix_ratio,
-            "enable_gfpgan": self.enable_gfpgan,
+            "enable_gfpgan": self.enable_gfpgan and (self.gfpgan_session is not None),
             "enable_face_parser": self.enable_face_parser and (self.parser_session is not None),
             "sharpness": self.sharpness,
             "skin_blend": self.skin_blend,
@@ -163,78 +180,105 @@ class AIFaceSwapPipeline:
             "providers": self.providers
         }
 
+    def _enhance_face_gfpgan(self, cropped_face_512: np.ndarray) -> np.ndarray:
+        """
+        GFPGAN v1.4 による 512x512 超解像・目元・瞳・肌の復元
+        """
+        if self.gfpgan_session is None:
+            return cropped_face_512
+        try:
+            rgb = cv2.cvtColor(cropped_face_512, cv2.COLOR_BGR2RGB).astype(np.float32)
+            # 正規化 [-1, 1]
+            norm = (rgb / 127.5) - 1.0
+            norm = np.transpose(norm, (2, 0, 1))
+            norm = np.expand_dims(norm, axis=0)
+
+            out = self.gfpgan_session.run(None, {self.gfpgan_input_name: norm})[0]
+            out_img = np.squeeze(out, axis=0)
+            out_img = np.transpose(out_img, (1, 2, 0))
+            out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
+            return cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+        except Exception as e:
+            return cropped_face_512
+
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
-        Direct ONNX による直接顔交換処理 (外部ライブラリ依存ゼロ)
+        Inswapper 128px ➔ GFPGAN 512px 超解像 ➔ 高精度アフィン逆変換
         """
         kps = face.kps
-        # 1. 相似変換行列 (2x3) を計算
-        M, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_128)
-        if M is None:
+        
+        # 1. 128x128 アライメント行列
+        M128, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_128)
+        if M128 is None:
             return img
 
-        # 2. 128x128 にクロップ & アライメント
-        crop_img = cv2.warpAffine(img, M, (128, 128), borderMode=cv2.BORDER_REPLICATE)
+        # 2. 128x128 クロップ
+        crop_img_128 = cv2.warpAffine(img, M128, (128, 128), borderMode=cv2.BORDER_REPLICATE)
         
-        # 3. Inswapper 用に入力テンソルを作成 (1, 3, 128, 128), range [0, 1]
-        crop_rgb = cv2.cvtColor(crop_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        blob = np.transpose(crop_rgb, (2, 0, 1))
-        blob = np.expand_dims(blob, axis=0)
+        # 3. Inswapper 推論
+        crop_rgb = cv2.cvtColor(crop_img_128, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        blob = np.transpose(crop_rgb, (2, 0, 1))[np.newaxis, ...]
 
-        # 4. Latent Embedding の E-map マッピング
         source_emb = latent_embedding.reshape(1, -1)
         if self.emap is not None:
             source_emb = np.dot(source_emb, self.emap)
             source_emb /= np.linalg.norm(source_emb)
 
-        # 5. ONNX 推論実行
         pred = self.swapper_session.run(None, {
             self.input_target_name: blob,
             self.input_source_name: source_emb.astype(np.float32)
         })[0]
 
-        # 6. 出力テンソルを BGR 画像に変換
         pred_img = np.squeeze(pred, axis=0)
         pred_img = np.transpose(pred_img, (1, 2, 0))
         pred_img = np.clip(pred_img * 255.0, 0, 255).astype(np.uint8)
         pred_bgr = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
 
-        # 7. スキンブレンド & 美肌スムージング (陶器肌フィルター)
-        if self.skin_blend > 0:
-            pred_bgr = cv2.addWeighted(crop_img, self.skin_blend, pred_bgr, 1.0 - self.skin_blend, 0)
+        # 4. GFPGAN 512px 超解像 (ボケ感を完全に消し去る)
+        use_512 = (self.enable_gfpgan and self.gfpgan_session is not None)
+        if use_512:
+            pred_512 = cv2.resize(pred_bgr, (512, 512), interpolation=cv2.INTER_CUBIC)
+            pred_bgr = self._enhance_face_gfpgan(pred_512)
+            M_final, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_512)
+            mask_template = MASK_512
+            target_size = (512, 512)
+        else:
+            M_final = M128
+            mask_template = MASK_128
+            target_size = (128, 128)
 
-        # エッジ保存美肌スムージング (目や鼻筋のクッキリ感を残したまま毛穴・くすみを滑らかに)
+        if M_final is None:
+            return img
+
+        # 5. 美肌スムージング (陶器肌)
         if self.beauty_smooth > 0:
-            smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=50, sigmaSpace=50)
-            pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth, smoothed, self.beauty_smooth, 0)
+            smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=40, sigmaSpace=40)
+            pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth * 0.7, smoothed, self.beauty_smooth * 0.7, 0)
 
-        # トーンアップ美白
+        # 6. トーンアップ美白
         if self.beauty_whitening > 0:
             hsv = cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.20), 0, 255)
-            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 - self.beauty_whitening * 0.15), 0, 255)
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.18), 0, 255)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1.0 - self.beauty_whitening * 0.12), 0, 255)
             pred_bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
+        # 7. シャープネス強調
         if self.sharpness > 1.0:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
 
         # 8. 逆アフィン変換で元画像にスムーズに貼り戻し (高品質CUBIC補間)
-        IM = cv2.invertAffineTransform(M)
+        IM = cv2.invertAffineTransform(M_final)
         h, w = img.shape[:2]
 
         warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
-        warped_mask = cv2.warpAffine(MASK_128, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_mask = cv2.warpAffine(mask_template, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         warped_mask = np.expand_dims(warped_mask, axis=-1)
 
-        # 背景や服・体は元画像 100%、顔の領域のみを滑らかに合成
         result = (img.astype(np.float32) * (1.0 - warped_mask) + warped_swapped.astype(np.float32) * warped_mask).astype(np.uint8)
         return result
 
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
-        """
-        1フレームの高速AI顔交換処理
-        """
         start_time = time.time()
         
         if self.current_target_face is None or frame is None:
@@ -246,7 +290,6 @@ class AIFaceSwapPipeline:
             
             if len(faces) > 0:
                 for face in faces:
-                    # 1. 特徴量（512次元ベクトル）のリアルタイム線形ブレンド
                     target_emb = self.current_target_face.normed_embedding
                     source_emb = face.normed_embedding
                     
@@ -256,13 +299,10 @@ class AIFaceSwapPipeline:
                     if norm > 0:
                         blended_emb = blended_emb / norm
 
-                    # 2. 直接 ONNX 推論による顔交換
                     swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
         except Exception as e:
             print(f"[AI Pipeline エラー] {e}")
-            import traceback
-            traceback.print_exc()
             swapped_frame = frame
             faces = []
 
