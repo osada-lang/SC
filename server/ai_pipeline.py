@@ -172,6 +172,7 @@ class AIFaceSwapPipeline:
             "available_targets": list(self.targets.keys()),
             "mix_ratio": self.mix_ratio,
             "enable_gfpgan": self.enable_gfpgan and (self.gfpgan_session is not None),
+            "gfpgan_ready": (self.gfpgan_session is not None),
             "enable_face_parser": self.enable_face_parser and (self.parser_session is not None),
             "sharpness": self.sharpness,
             "skin_blend": self.skin_blend,
@@ -182,7 +183,7 @@ class AIFaceSwapPipeline:
 
     def _enhance_face_gfpgan(self, cropped_face_512: np.ndarray) -> np.ndarray:
         """
-        GFPGAN v1.4 による 512x512 超解像・目元・瞳・肌の復元
+        GFPGAN v1.4 による 512x512 超解像・目元・瞳・肌のリアル復元
         """
         if self.gfpgan_session is None:
             return cropped_face_512
@@ -197,8 +198,10 @@ class AIFaceSwapPipeline:
             out_img = np.squeeze(out, axis=0)
             out_img = np.transpose(out_img, (1, 2, 0))
             out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
-            return cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+            out_bgr = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+            return out_bgr
         except Exception as e:
+            print(f"[GFPGAN 実行エラー] {e}")
             return cropped_face_512
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:

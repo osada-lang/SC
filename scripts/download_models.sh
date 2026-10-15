@@ -3,39 +3,38 @@ set -e
 
 mkdir -p models
 
-echo "=== AIモデルの自動ダウンロードを開始します ==="
+echo "=================================================="
+echo "  LiveChat AI - 完全版モデルの自動ダウンロード"
+echo "=================================================="
 
 # 1. Inswapper 128 (約554MB)
-if [ ! -s "models/inswapper_128.onnx" ] || [ $(stat -c%s "models/inswapper_128.onnx" 2>/dev/null || stat -f%z "models/inswapper_128.onnx" 2>/dev/null || echo 0) -lt 100000000 ]; then
-    echo "Downloading inswapper_128.onnx..."
-    curl -L -o models/inswapper_128.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx
+if [ ! -s "models/inswapper_128.onnx" ] || [ $(stat -c%s "models/inswapper_128.onnx" 2>/dev/null || stat -f%z "models/inswapper_128.onnx" 2>/dev/null || echo 0) -lt 300000000 ]; then
+    echo "[1/3] Inswapper 128 をダウンロード中 (約554MB)..."
+    rm -f models/inswapper_128.onnx
+    wget -q --show-progress -O models/inswapper_128.onnx "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/inswapper_128.onnx"
 else
-    echo "inswapper_128.onnx is ready."
+    echo "✓ Inswapper 128 は準備完了です。"
 fi
 
-# 2. GFPGAN v1.4 (超解像・高画質化 約340MB)
-if [ ! -s "models/GFPGANv1.4.onnx" ] || [ $(stat -c%s "models/GFPGANv1.4.onnx" 2>/dev/null || stat -f%z "models/GFPGANv1.4.onnx" 2>/dev/null || echo 0) -lt 50000000 ]; then
-    echo "Downloading GFPGANv1.4.onnx..."
-    curl -L -o models/GFPGANv1.4.onnx https://huggingface.co/MonsterMMORPG/tools/resolve/main/GFPGANv1.4.onnx || \
-    curl -L -o models/GFPGANv1.4.onnx https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/GFPGANv1.4.onnx || true
+# 2. GFPGAN v1.4 超解像・目元高画質化 (約348MB 完全バイナリ)
+if [ ! -s "models/GFPGANv1.4.onnx" ] || [ $(stat -c%s "models/GFPGANv1.4.onnx" 2>/dev/null || stat -f%z "models/GFPGANv1.4.onnx" 2>/dev/null || echo 0) -lt 300000000 ]; then
+    echo "[2/3] GFPGAN v1.4 超解像モデルをダウンロード中 (約348MB)..."
+    rm -f models/GFPGANv1.4.onnx
+    wget -q --show-progress -O models/GFPGANv1.4.onnx "https://huggingface.co/MonsterMMORPG/tools/resolve/main/GFPGANv1.4.onnx" || \
+    wget -q --show-progress -O models/GFPGANv1.4.onnx "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/GFPGANv1.4.onnx"
 else
-    echo "GFPGANv1.4.onnx is ready."
+    echo "✓ GFPGAN v1.4 超解像モデルは準備完了です。"
 fi
 
 # 3. Face Parser (BiSeNet 約50MB)
 if [ ! -s "models/face_parser.onnx" ] || [ $(stat -c%s "models/face_parser.onnx" 2>/dev/null || stat -f%z "models/face_parser.onnx" 2>/dev/null || echo 0) -lt 10000000 ]; then
-    echo "Downloading face_parser.onnx..."
-    curl -L -o models/face_parser.onnx https://huggingface.co/MonsterMMORPG/tools/resolve/main/face_parser.onnx || true
+    echo "[3/3] Face Parser をダウンロード中 (約50MB)..."
+    rm -f models/face_parser.onnx
+    wget -q --show-progress -O models/face_parser.onnx "https://huggingface.co/MonsterMMORPG/tools/resolve/main/face_parser.onnx" || true
 else
-    echo "face_parser.onnx is ready."
+    echo "✓ Face Parser は準備完了です。"
 fi
 
-# 4. MediaPipe Hand Landmarker (手の骨格・オクルージョン検出 約11MB)
-if [ ! -s "models/hand_landmarker.task" ]; then
-    echo "Downloading hand_landmarker.task..."
-    curl -L -o models/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task || true
-else
-    echo "hand_landmarker.task is ready."
-fi
-
-echo "=== すべてのAIモデルが正常に準備完了しました ==="
+echo "=================================================="
+echo "  🎉 すべてのAIモデル（完全版）が正常に揃いました！"
+echo "=================================================="
