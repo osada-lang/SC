@@ -3,9 +3,14 @@
 #  LiveChat AI Studio - 全自動サーバー連動ランチャー (Mac用)
 # ========================================================
 
-cd "$(dirname "$0")"
+APP_DIR="$HOME/dev/SC"
 
-# Pythonランチャーを実行 (自動サーバー起動 ➔ IP取得 ➔ アプリ起動)
-python3 scripts/launch_app.py "$@"
+if [ -d "$APP_DIR" ]; then
+    cd "$APP_DIR"
+    python3 "$APP_DIR/scripts/launch_app.py" "$@"
+else
+    echo "エラー: $APP_DIR フォルダが見つかりません。"
+    read -p "Press enter to exit..."
+fi
 
 exit 0
