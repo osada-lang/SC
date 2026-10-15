@@ -227,21 +227,33 @@ class AIFaceSwapPipeline:
         except Exception:
             return cropped_face_512
 
-    def _create_inner_face_mask(self, img_shape, kps):
+    def _create_inner_face_mask(self, img_shape, face, kps):
         """
-        目・眉・鼻・口のインナーパーツのみを高精度に覆う凸包フェザーマスクを生成
-        輪郭・アゴ・生え際の貼り付け感を完全に消去するプロ仕様マスク
+        目・眉・鼻・口の全パーツを100%不透明で包み込み、
+        フェイスラインの境界（外側）のみを滑らかにフェザリングするプロ仕様マスク
         """
         h, w = img_shape[:2]
         mask = np.zeros((h, w), dtype=np.float32)
-        
-        hull = cv2.convexHull(kps.astype(np.int32))
+
+        # 106点ランドマークがある場合は全パーツの輪郭を使用
+        if hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
+            pts = face.landmark_2d_106.astype(np.int32)
+            hull = cv2.convexHull(pts)
+        else:
+            # 5点ランドマークから顔の中心基準でパーツ全体（眉〜口角〜アゴ上部）を包むように外側に拡張
+            center = kps.mean(axis=0)
+            expanded_kps = center + (kps - center) * 1.55
+            hull = cv2.convexHull(expanded_kps.astype(np.int32))
+
         cv2.fillConvexPoly(mask, hull, 1.0)
-        
-        # 境界を自然にぼかす (フェザリング)
-        k_size = max(15, int(w * 0.12) | 1)
-        mask_blurred = cv2.GaussianBlur(mask, (k_size, k_size), 0)
-        return np.expand_dims(mask_blurred, axis=-1)
+
+        # 境界のみを滑らかにフェザリング (内側のパーツは100%不透明をキープ)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        mask_inner = cv2.erode(mask, kernel, iterations=2)
+        mask_blurred = cv2.GaussianBlur(mask, (21, 21), 0)
+        final_mask = np.maximum(mask_inner, mask_blurred)
+
+        return np.expand_dims(final_mask, axis=-1)
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
@@ -313,8 +325,8 @@ class AIFaceSwapPipeline:
         h, w = img.shape[:2]
         warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
 
-        # 9. インナーパーツ限定マスクの生成 (笑顔・シワ・歯の歪みを100%防止)
-        inner_mask = self._create_inner_face_mask(img.shape, kps)
+        # 9. インナーパーツ限定マスクの生成 (目・眉・鼻・口の全パーツを100%確実にカバー)
+        inner_mask = self._create_inner_face_mask(img.shape, face, kps)
 
         # 最終ブレンド合成
         result = (img.astype(np.float32) * (1.0 - inner_mask) + warped_swapped.astype(np.float32) * inner_mask).astype(np.uint8)
