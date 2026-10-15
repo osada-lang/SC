@@ -193,6 +193,7 @@ async def api_settings(settings: dict):
         enable_gfpgan=settings.get("enable_gfpgan"),
         gfpgan_weight=settings.get("gfpgan_weight"),
         enable_face_parser=settings.get("enable_face_parser"),
+        exclude_mouth=settings.get("exclude_mouth"),
         sharpness=settings.get("sharpness"),
         skin_blend=settings.get("skin_blend"),
         beauty_smooth=settings.get("beauty_smooth"),

@@ -169,14 +169,26 @@
             <input type="range" id="sliderGFPGANWeight" min="0" max="100" value="85" class="range-slider">
           </div>
 
-          <!-- 手・指の透過防止 (FaceParser) -->
+          <!-- 手・指の透過防止 (MediaPipe) -->
           <div class="control-group row-group">
             <div>
-              <div class="label-title">手・異物マスク (FaceParser)</div>
+              <div class="label-title">手・異物マスク (MediaPipe)</div>
               <div class="label-desc">顔の前に出した手の透けを防止</div>
             </div>
             <label class="switch">
               <input type="checkbox" id="toggleFaceParser" checked>
+              <span class="slider round"></span>
+            </label>
+          </div>
+
+          <!-- 口元保護 (口交換なしモード) -->
+          <div class="control-group row-group">
+            <div>
+              <div class="label-title">口元・歯の生来保護 (口交換なし)</div>
+              <div class="label-desc">唇・歯・笑顔の動きを100%本人キープ</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="toggleExcludeMouth" checked>
               <span class="slider round"></span>
             </label>
           </div>
