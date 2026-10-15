@@ -21,36 +21,116 @@ ARCFACE_DST_128 = np.array([
 
 ARCFACE_DST_512 = ARCFACE_DST_128 * 4.0
 
-# マスク用楕円テンプレート (128x128)
+# 楕円マスクテンプレート (128x128 & 512x512)
 MASK_128 = np.zeros((128, 128), dtype=np.float32)
 cv2.ellipse(MASK_128, (64, 68), (48, 60), 0, 0, 360, 1.0, -1)
 MASK_128 = cv2.GaussianBlur(MASK_128, (19, 19), 0)
 MASK_128 = np.expand_dims(MASK_128, axis=-1)
 
-# マスク用高精細楕円テンプレート (512x512)
 MASK_512 = np.zeros((512, 512), dtype=np.float32)
 cv2.ellipse(MASK_512, (256, 272), (192, 240), 0, 0, 360, 1.0, -1)
 MASK_512 = cv2.GaussianBlur(MASK_512, (35, 35), 0)
 MASK_512 = np.expand_dims(MASK_512, axis=-1)
 
 
+# =====================================================================
+# 1. SLERP (球面線形補間: 歪みのない真の顔モーフィング)
+# =====================================================================
+def slerp_vectors(v0: np.ndarray, v1: np.ndarray, t: float, dot_threshold=0.9995) -> np.ndarray:
+    """
+    512次元潜在球面上を滑らかに回転補間するSLERP数学モデル
+    """
+    v0_norm = v0 / np.linalg.norm(v0)
+    v1_norm = v1 / np.linalg.norm(v1)
+    
+    dot = np.dot(v0_norm, v1_norm)
+    if dot > dot_threshold:
+        res = v0_norm + t * (v1_norm - v0_norm)
+        return res / np.linalg.norm(res)
+    
+    dot = np.clip(dot, -1.0, 1.0)
+    theta_0 = np.arccos(dot)
+    sin_theta_0 = np.sin(theta_0)
+    
+    theta_t = theta_0 * t
+    sin_theta_t = np.sin(theta_t)
+    
+    s0 = np.sin(theta_0 - theta_t) / sin_theta_0
+    s1 = sin_theta_t / sin_theta_0
+    
+    res = (s0 * v0_norm) + (s1 * v1_norm)
+    return res / np.linalg.norm(res)
+
+
+# =====================================================================
+# 2. LAB色空間カラー＆ライティング自動適合 (Reinhard Color Transfer)
+# =====================================================================
+def apply_lab_color_transfer(source_img: np.ndarray, target_ref: np.ndarray) -> np.ndarray:
+    """
+    ターゲット顔の色味・明度を、部屋の照明（元のカメラ映像）に100%自動同調させて貼り付け感を消滅させる
+    """
+    try:
+        src_lab = cv2.cvtColor(source_img, cv2.COLOR_BGR2LAB).astype(np.float32)
+        ref_lab = cv2.cvtColor(target_ref, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        src_mean, src_std = src_lab.mean(axis=(0, 1)), src_lab.std(axis=(0, 1)) + 1e-6
+        ref_mean, ref_std = ref_lab.mean(axis=(0, 1)), ref_lab.std(axis=(0, 1)) + 1e-6
+
+        # 色調のスケーリング
+        matched_lab = (src_lab - src_mean) * (ref_std / src_std) + ref_mean
+        matched_lab = np.clip(matched_lab, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(matched_lab, cv2.COLOR_LAB2BGR)
+    except Exception:
+        return source_img
+
+
+# =====================================================================
+# 3. アゴ周り・口周りのシャドウ＆髭ノイズ除去 (Stubble Cleanser)
+# =====================================================================
+def cleanse_shadow_and_stubble(crop_img: np.ndarray) -> np.ndarray:
+    """
+    Inswapper入力前にアゴ周りの暗い影や髭の黒ずみテクスチャを滑らかにクレンジングする
+    """
+    try:
+        h, w = crop_img.shape[:2]
+        # アゴ・口周り領域 (下部 45%)
+        jaw_y = int(h * 0.55)
+        jaw_roi = crop_img[jaw_y:h, :]
+
+        # 影・テクスチャの平滑化 (エッジ保持バイラテラル)
+        cleansed_jaw = cv2.bilateralFilter(jaw_roi, d=9, sigmaColor=75, sigmaSpace=75)
+        
+        # なだらかなグラデーションで合成
+        alpha = np.linspace(0.0, 0.7, h - jaw_y)[:, np.newaxis, np.newaxis]
+        crop_img[jaw_y:h, :] = (jaw_roi * (1.0 - alpha) + cleansed_jaw * alpha).astype(np.uint8)
+        return crop_img
+    except Exception:
+        return crop_img
+
+
+# =====================================================================
+# 統合AI顔交換パイプライン (カメレオンAI 完全準拠版)
+# =====================================================================
 class AIFaceSwapPipeline:
-    """
-    リアルタイム顔交換・顔ブレンド・GFPGAN超解像・美肌スムージング統合パイプライン
-    """
     def __init__(self, models_dir="models", default_target_path=None):
         self.models_dir = models_dir
         self.providers = self._get_optimal_providers()
         print(f"[AI Pipeline] 使用プロバイダー: {self.providers}")
 
         # リアルタイム調整パラメータ
-        self.mix_ratio = 0.70          # 0.0(本人100%) 〜 1.0(見本100%)
+        self.mix_ratio = 0.70          # 0.0(本人100%) 〜 1.0(見本100%) (SLERP制御)
         self.enable_face_parser = False # 手・異物の透過防止マスク
-        self.enable_gfpgan = True      # GFPGAN超解像 (デフォルトONで最高画質)
+        self.enable_gfpgan = True      # GFPGAN超解像 (512px高精細)
         self.sharpness = 1.3           # アンシャープマスク強度
         self.skin_blend = 0.15         # 元の肌の馴染ませ率
-        self.beauty_smooth = 0.60      # 美肌スムージング (0.0〜1.0: 陶器肌)
-        self.beauty_whitening = 0.20   # トーンアップ美白 (0.0〜1.0)
+        self.beauty_smooth = 0.60      # 美肌スムージング (陶器肌)
+        self.beauty_whitening = 0.20   # トーンアップ美白
+        self.enable_color_match = True # 照明・色調マッチング
+
+        # 時間的ブレ防止 (Temporal Smoothing EMA キャッシュ)
+        self.prev_kps = None
+        self.prev_embedding = None
+        self.ema_alpha = 0.75          # 追従係数
 
         sess_opts = ort.SessionOptions()
         sess_opts.intra_op_num_threads = 4
@@ -86,7 +166,7 @@ class AIFaceSwapPipeline:
         except Exception as e:
             print(f"[AI Pipeline] emap 自動抽出警告: {e}")
 
-        # 3. GFPGAN v1.4 超解像・目元高画質化モデル (512px)
+        # 3. GFPGAN v1.4 超解像モデル (512px)
         gfpgan_path = os.path.join(models_dir, "GFPGANv1.4.onnx")
         self.gfpgan_session = None
         if os.path.exists(gfpgan_path):
@@ -118,7 +198,7 @@ class AIFaceSwapPipeline:
             self.set_target_from_file("default", default_target_path)
 
         self.last_frame_time = time.time()
-        print("[AI Pipeline] パイプライン準備完了 (GFPGAN 512px 高精細モード稼働)")
+        print("[AI Pipeline] パイプライン準備完了 (カメレオンAI 全機能統合モード)")
 
     def _get_optimal_providers(self):
         available = ort.get_available_providers()
@@ -182,14 +262,10 @@ class AIFaceSwapPipeline:
         }
 
     def _enhance_face_gfpgan(self, cropped_face_512: np.ndarray) -> np.ndarray:
-        """
-        GFPGAN v1.4 による 512x512 超解像・目元・瞳・肌のリアル復元
-        """
         if self.gfpgan_session is None:
             return cropped_face_512
         try:
             rgb = cv2.cvtColor(cropped_face_512, cv2.COLOR_BGR2RGB).astype(np.float32)
-            # 正規化 [-1, 1]
             norm = (rgb / 127.5) - 1.0
             norm = np.transpose(norm, (2, 0, 1))
             norm = np.expand_dims(norm, axis=0)
@@ -198,28 +274,38 @@ class AIFaceSwapPipeline:
             out_img = np.squeeze(out, axis=0)
             out_img = np.transpose(out_img, (1, 2, 0))
             out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
-            out_bgr = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
-            return out_bgr
-        except Exception as e:
-            print(f"[GFPGAN 実行エラー] {e}")
+            return cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+        except Exception:
             return cropped_face_512
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
-        Inswapper 128px ➔ GFPGAN 512px 超解像 ➔ 高精度アフィン逆変換
+        全処理統合エンジン:
+        1. ランドマーク平滑化 (EMA)
+        2. アゴ・口周りシャドウクレンジング
+        3. Inswapper 128px
+        4. LAB照明・カラーマッチング
+        5. GFPGAN 512px 超解像
+        6. 美肌・陶器肌フィルター
+        7. 手・指オクルージョン保護
         """
+        # A. ランドマークの時間的平滑化 (EMA: ジッター・微細な震えの除去)
         kps = face.kps
-        
-        # 1. 128x128 アライメント行列
+        if self.prev_kps is not None and np.linalg.norm(self.prev_kps - kps) < 30.0:
+            kps = self.prev_kps * (1.0 - self.ema_alpha) + kps * self.ema_alpha
+        self.prev_kps = kps
+
+        # 1. 相似変換行列 (128px)
         M128, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_128)
         if M128 is None:
             return img
 
-        # 2. 128x128 クロップ
+        # 2. 128x128 クロップ & アゴ周りシャドウクレンジング (無精髭誤認防止)
         crop_img_128 = cv2.warpAffine(img, M128, (128, 128), borderMode=cv2.BORDER_REPLICATE)
+        cleansed_crop_128 = cleanse_shadow_and_stubble(crop_img_128.copy())
         
         # 3. Inswapper 推論
-        crop_rgb = cv2.cvtColor(crop_img_128, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        crop_rgb = cv2.cvtColor(cleansed_crop_128, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(crop_rgb, (2, 0, 1))[np.newaxis, ...]
 
         source_emb = latent_embedding.reshape(1, -1)
@@ -237,28 +323,29 @@ class AIFaceSwapPipeline:
         pred_img = np.clip(pred_img * 255.0, 0, 255).astype(np.uint8)
         pred_bgr = cv2.cvtColor(pred_img, cv2.COLOR_RGB2BGR)
 
-        # 4. GFPGAN 512px 超解像 (ボケ感を完全に消し去る)
+        # 4. LAB照明・カラーマッチング (部屋の照明に完璧に同調)
+        if self.enable_color_match:
+            pred_bgr = apply_lab_color_transfer(pred_bgr, crop_img_128)
+
+        # 5. GFPGAN 512px 超解像 (目元・瞳・肌の復元)
         use_512 = (self.enable_gfpgan and self.gfpgan_session is not None)
         if use_512:
             pred_512 = cv2.resize(pred_bgr, (512, 512), interpolation=cv2.INTER_CUBIC)
             pred_bgr = self._enhance_face_gfpgan(pred_512)
             M_final, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_512)
             mask_template = MASK_512
-            target_size = (512, 512)
         else:
             M_final = M128
             mask_template = MASK_128
-            target_size = (128, 128)
 
         if M_final is None:
             return img
 
-        # 5. 美肌スムージング (陶器肌)
+        # 6. 美肌スムージング (陶器肌) & トーンアップ美白
         if self.beauty_smooth > 0:
             smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=40, sigmaSpace=40)
             pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth * 0.7, smoothed, self.beauty_smooth * 0.7, 0)
 
-        # 6. トーンアップ美白
         if self.beauty_whitening > 0:
             hsv = cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
             hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.18), 0, 255)
@@ -270,7 +357,7 @@ class AIFaceSwapPipeline:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
 
-        # 8. 逆アフィン変換で元画像にスムーズに貼り戻し (高品質CUBIC補間)
+        # 8. 逆アフィン変換で元画像にスムーズに貼り戻し
         IM = cv2.invertAffineTransform(M_final)
         h, w = img.shape[:2]
 
@@ -278,7 +365,7 @@ class AIFaceSwapPipeline:
         warped_mask = cv2.warpAffine(mask_template, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         warped_mask = np.expand_dims(warped_mask, axis=-1)
 
-        # 9. 手・異物のオクルージョン保護 (顔の前に手が出た時の透け・顔崩れ完全防止)
+        # 9. 手・異物のオクルージョン保護 (ピース・手の透け防止)
         bbox = face.bbox.astype(int)
         x1, y1 = max(0, bbox[0]), max(0, bbox[1])
         x2, y2 = min(w, bbox[2]), min(h, bbox[3])
@@ -290,14 +377,12 @@ class AIFaceSwapPipeline:
             hsv = cv2.cvtColor(face_roi, cv2.COLOR_BGR2HSV)
             skin_mask = cv2.inRange(hsv, np.array([0, 25, 50], dtype=np.uint8), np.array([25, 170, 255], dtype=np.uint8))
             
-            # 手・指のエッジと皮膚の交差領域を抽出
             hand_edges = cv2.bitwise_and(skin_mask, edges)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
             hand_mask = cv2.morphologyEx(hand_edges, cv2.MORPH_CLOSE, kernel)
             hand_mask = cv2.dilate(hand_mask, kernel, iterations=2)
             hand_mask_blur = cv2.GaussianBlur(hand_mask, (11, 11), 0)
             
-            # 手のマスクがある部分の warped_mask を弱めて元映像（手）を最前面に残す
             full_hand_mask = np.zeros((h, w, 1), dtype=np.float32)
             full_hand_mask[y1:y2, x1:x2, 0] = (hand_mask_blur / 255.0) * 0.85
             warped_mask = np.clip(warped_mask * (1.0 - full_hand_mask), 0.0, 1.0)
@@ -320,12 +405,10 @@ class AIFaceSwapPipeline:
                     target_emb = self.current_target_face.normed_embedding
                     source_emb = face.normed_embedding
                     
-                    alpha = self.mix_ratio
-                    blended_emb = (target_emb * alpha) + (source_emb * (1.0 - alpha))
-                    norm = np.linalg.norm(blended_emb)
-                    if norm > 0:
-                        blended_emb = blended_emb / norm
+                    # 1. SLERP による真の顔モーフィング (本人 ➔ 見本)
+                    blended_emb = slerp_vectors(source_emb, target_emb, self.mix_ratio)
 
+                    # 2. 全処理統合エンジンによる顔交換
                     swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
         except Exception as e:
