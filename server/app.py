@@ -191,6 +191,7 @@ async def api_settings(settings: dict):
     pipeline.set_parameters(
         mix_ratio=settings.get("mix_ratio"),
         enable_gfpgan=settings.get("enable_gfpgan"),
+        gfpgan_weight=settings.get("gfpgan_weight"),
         enable_face_parser=settings.get("enable_face_parser"),
         sharpness=settings.get("sharpness"),
         skin_blend=settings.get("skin_blend"),

@@ -26,6 +26,8 @@ const btnUploadTrigger = document.getElementById('btnUploadTrigger');
 const sliderMixRatio = document.getElementById('sliderMixRatio');
 const mixRatioVal = document.getElementById('mixRatioVal');
 const toggleGFPGAN = document.getElementById('toggleGFPGAN');
+const sliderGFPGANWeight = document.getElementById('sliderGFPGANWeight');
+const gfpganWeightVal = document.getElementById('gfpganWeightVal');
 const toggleFaceParser = document.getElementById('toggleFaceParser');
 const sliderBeautySmooth = document.getElementById('sliderBeautySmooth');
 const beautySmoothVal = document.getElementById('beautySmoothVal');
@@ -127,6 +129,7 @@ async function pushSettings() {
       body: JSON.stringify({
         mix_ratio: parseInt(sliderMixRatio.value, 10) / 100.0,
         enable_gfpgan: toggleGFPGAN.checked,
+        gfpgan_weight: parseInt(sliderGFPGANWeight.value, 10) / 100.0,
         enable_face_parser: toggleFaceParser.checked,
         sharpness: parseInt(sliderSharpness.value, 10) / 10.0,
         skin_blend: parseInt(sliderSkinBlend.value, 10) / 100.0,
@@ -144,6 +147,10 @@ sliderMixRatio.addEventListener('input', (e) => {
   pushSettings();
 });
 toggleGFPGAN.addEventListener('change', pushSettings);
+sliderGFPGANWeight.addEventListener('input', (e) => {
+  gfpganWeightVal.textContent = `${e.target.value}%`;
+  pushSettings();
+});
 toggleFaceParser.addEventListener('change', pushSettings);
 sliderBeautySmooth.addEventListener('input', (e) => {
   beautySmoothVal.textContent = `${e.target.value}%`;

@@ -121,6 +121,7 @@ class AIFaceSwapPipeline:
         self.mix_ratio = 0.70          # 0.0(本人100%) 〜 1.0(見本100%) (SLERP制御)
         self.enable_face_parser = False # 手・異物の透過防止マスク
         self.enable_gfpgan = True      # GFPGAN超解像 (512px高精細)
+        self.gfpgan_weight = 0.85      # GFPGAN復元強度 (0.0〜1.0)
         self.sharpness = 1.3           # アンシャープマスク強度
         self.skin_blend = 0.15         # 元の肌の馴染ませ率
         self.beauty_smooth = 0.60      # 美肌スムージング (陶器肌)
@@ -230,11 +231,13 @@ class AIFaceSwapPipeline:
         self.current_target_face = target_face
         return True
 
-    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, enable_face_parser=None, sharpness=None, skin_blend=None, beauty_smooth=None, beauty_whitening=None):
+    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, gfpgan_weight=None, enable_face_parser=None, sharpness=None, skin_blend=None, beauty_smooth=None, beauty_whitening=None):
         if mix_ratio is not None:
             self.mix_ratio = float(np.clip(mix_ratio, 0.0, 1.0))
         if enable_gfpgan is not None:
             self.enable_gfpgan = bool(enable_gfpgan)
+        if gfpgan_weight is not None:
+            self.gfpgan_weight = float(np.clip(gfpgan_weight, 0.0, 1.0))
         if enable_face_parser is not None:
             self.enable_face_parser = bool(enable_face_parser)
         if sharpness is not None:
@@ -253,6 +256,7 @@ class AIFaceSwapPipeline:
             "mix_ratio": self.mix_ratio,
             "enable_gfpgan": self.enable_gfpgan and (self.gfpgan_session is not None),
             "gfpgan_ready": (self.gfpgan_session is not None),
+            "gfpgan_weight": self.gfpgan_weight,
             "enable_face_parser": self.enable_face_parser and (self.parser_session is not None),
             "sharpness": self.sharpness,
             "skin_blend": self.skin_blend,
@@ -274,8 +278,12 @@ class AIFaceSwapPipeline:
             out_img = np.squeeze(out, axis=0)
             out_img = np.transpose(out_img, (1, 2, 0))
             out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
-            return cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
-        except Exception:
+            enhanced = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+
+            if self.gfpgan_weight < 1.0:
+                enhanced = cv2.addWeighted(cropped_face_512, 1.0 - self.gfpgan_weight, enhanced, self.gfpgan_weight, 0)
+            return enhanced
+        except Exception as e:
             return cropped_face_512
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:

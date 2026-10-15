@@ -152,12 +152,21 @@
           <div class="control-group row-group">
             <div>
               <div class="label-title">GFPGAN 超解像・目元高画質化</div>
-              <div class="label-desc">目元や肌を高精細化 (GPU推奨)</div>
+              <div class="label-desc">目元や瞳・肌を512px超解像</div>
             </div>
             <label class="switch">
-              <input type="checkbox" id="toggleGFPGAN">
+              <input type="checkbox" id="toggleGFPGAN" checked>
               <span class="slider round"></span>
             </label>
+          </div>
+
+          <!-- GFPGAN超解像強度スライダー -->
+          <div class="control-group" id="gfpganWeightGroup">
+            <div class="control-label">
+              <span>GFPGAN 超解像・目元復元強度</span>
+              <span class="control-val" id="gfpganWeightVal">85%</span>
+            </div>
+            <input type="range" id="sliderGFPGANWeight" min="0" max="100" value="85" class="range-slider">
           </div>
 
           <!-- 手・指の透過防止 (FaceParser) -->

@@ -16,21 +16,20 @@ else
     echo "✓ Inswapper 128 は準備完了です。"
 fi
 
-# 2. GFPGAN v1.4 超解像・目元高画質化 (約348MB 完全バイナリ)
+# 2. GFPGAN v1.4 超解像・目元高画質化 (約340MB 完全バイナリ)
 if [ ! -s "models/GFPGANv1.4.onnx" ] || [ $(stat -c%s "models/GFPGANv1.4.onnx" 2>/dev/null || stat -f%z "models/GFPGANv1.4.onnx" 2>/dev/null || echo 0) -lt 300000000 ]; then
-    echo "[2/3] GFPGAN v1.4 超解像モデルをダウンロード中 (約348MB)..."
+    echo "[2/3] GFPGAN v1.4 超解像モデルをダウンロード中 (約340MB)..."
     rm -f models/GFPGANv1.4.onnx
-    wget -q --show-progress -O models/GFPGANv1.4.onnx "https://huggingface.co/MonsterMMORPG/tools/resolve/main/GFPGANv1.4.onnx" || \
-    wget -q --show-progress -O models/GFPGANv1.4.onnx "https://huggingface.co/ezioruan/inswapper_128.onnx/resolve/main/GFPGANv1.4.onnx"
+    wget -q --show-progress -O models/GFPGANv1.4.onnx "https://huggingface.co/facefusion/models-3.0.0/resolve/main/gfpgan_1.4.onnx"
 else
     echo "✓ GFPGAN v1.4 超解像モデルは準備完了です。"
 fi
 
-# 3. Face Parser (BiSeNet 約50MB)
+# 3. Face Parser (BiSeNet 約53MB 完全バイナリ)
 if [ ! -s "models/face_parser.onnx" ] || [ $(stat -c%s "models/face_parser.onnx" 2>/dev/null || stat -f%z "models/face_parser.onnx" 2>/dev/null || echo 0) -lt 10000000 ]; then
-    echo "[3/3] Face Parser をダウンロード中 (約50MB)..."
+    echo "[3/3] Face Parser (BiSeNet) をダウンロード中 (約53MB)..."
     rm -f models/face_parser.onnx
-    wget -q --show-progress -O models/face_parser.onnx "https://huggingface.co/MonsterMMORPG/tools/resolve/main/face_parser.onnx" || true
+    wget -q --show-progress -O models/face_parser.onnx "https://github.com/yakhyo/face-parsing/releases/download/v0.0.1/bisenet_resnet18.onnx" || true
 else
     echo "✓ Face Parser は準備完了です。"
 fi
