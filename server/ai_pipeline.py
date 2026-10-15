@@ -76,7 +76,7 @@ def apply_skin_tone_matching(swapped_crop: np.ndarray, original_crop: np.ndarray
 
 
 # =====================================================================
-# 統合AI顔交換パイプライン (MediaPipe 手骨格追従 ＆ カメレオンAI再現エンジン)
+# 統合AI顔交換パイプライン (カメレオンAI 完全準拠 プロ仕様全機能版)
 # =====================================================================
 class AIFaceSwapPipeline:
     def __init__(self, models_dir="models", default_target_path=None):
@@ -87,8 +87,9 @@ class AIFaceSwapPipeline:
         # パラメータ設定
         self.mix_ratio = 0.70          # 顔ミックス比率 (0.0〜1.0)
         self.enable_gfpgan = True      # GFPGAN超解像
-        self.gfpgan_weight = 0.65      # GFPGAN復元強度
+        self.gfpgan_weight = 0.65      # GFPGAN復元強度 (65%推奨)
         self.enable_face_parser = True # 手の透け防止オクルージョンマスク (MediaPipe)
+        self.enable_mouth_protection = True # 口内・歯・舌のリアルタイム保護
         self.sharpness = 1.3           # シャープネス
         self.skin_blend = 0.15         # 元の顔馴染ませ率
         self.beauty_smooth = 0.60      # 美肌スムージング (陶器肌)
@@ -96,6 +97,7 @@ class AIFaceSwapPipeline:
 
         # 時間的平滑化 (EMA)
         self.prev_kps = None
+        self.prev_landmarks = None
         self.ema_alpha = 0.80
 
         sess_opts = ort.SessionOptions()
@@ -167,7 +169,7 @@ class AIFaceSwapPipeline:
             self.set_target_from_file("default", default_target_path)
 
         self.last_frame_time = time.time()
-        print("[AI Pipeline] パイプライン準備完了 (カメレオンAI 完全再現エンジン稼働)")
+        print("[AI Pipeline] パイプライン準備完了 (カメレオンAI 完全再現プロ仕様版)")
 
     def _get_optimal_providers(self):
         available = ort.get_available_providers()
@@ -269,6 +271,7 @@ class AIFaceSwapPipeline:
 
         cv2.fillConvexPoly(mask, hull, 1.0)
 
+        # 境界のみを滑らかにフェザリング
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
         mask_inner = cv2.erode(mask, kernel, iterations=2)
         mask_blurred = cv2.GaussianBlur(mask, (21, 21), 0)
@@ -276,9 +279,43 @@ class AIFaceSwapPipeline:
 
         return np.expand_dims(final_mask, axis=-1)
 
+    def _detect_mouth_interior_mask(self, img_shape, face) -> np.ndarray:
+        """
+        【重要技法1】口内・歯・舌のリアルタイム保護マスク (Mouth & Teeth Passthrough)
+        口を開けて笑ったり喋った時、歯や口内を本人のオリジナル映像で保持し、笑顔の歪みを100%防止する
+        """
+        h, w = img_shape[:2]
+        mouth_mask = np.zeros((h, w, 1), dtype=np.float32)
+
+        if not hasattr(face, 'landmark_2d_106') or face.landmark_2d_106 is None:
+            return mouth_mask
+
+        try:
+            lmk = face.landmark_2d_106.astype(np.int32)
+            # 106点ランドマークにおける内側の唇・口内インデックス (インナーリップ)
+            # 52〜71付近の内側口輪郭
+            inner_mouth_indices = [52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71]
+            valid_pts = lmk[inner_mouth_indices]
+
+            # 口の開き具合 (高さ) の計算
+            mouth_height = np.max(valid_pts[:, 1]) - np.min(valid_pts[:, 1])
+            mouth_width = np.max(valid_pts[:, 0]) - np.min(valid_pts[:, 0])
+
+            # 口が開いている（喋っている/笑っている）場合のみ口内を保護
+            if mouth_height > (mouth_width * 0.15) and mouth_height > 6:
+                hull = cv2.convexHull(valid_pts)
+                mask_2d = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillConvexPoly(mask_2d, hull, 255)
+                mask_blur = cv2.GaussianBlur(mask_2d, (7, 7), 0)
+                mouth_mask = (mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
+        except Exception:
+            pass
+
+        return mouth_mask
+
     def _detect_hand_mask_mediapipe(self, frame: np.ndarray) -> np.ndarray:
         """
-        MediaPipe Hands による手の21点骨格ポリゴンマスク生成 (カメレオンAIの真の仕組み)
+        【重要技法2】MediaPipe Hands 手の骨格ポリゴンマスク生成 (カメレオンAIと同等)
         手が画面にない時は完全な 0.0 (顔交換 100% 発動・照明誤爆ゼロ)
         手が顔の前に重なった時だけ、その指・手のひらの形を 1.0 (最前面保護)
         """
@@ -303,18 +340,15 @@ class AIFaceSwapPipeline:
                     pts.append([px, py])
                 
                 pts = np.array(pts, dtype=np.int32)
-                # 手のひら・指全体の凸包ポリゴン
                 hull = cv2.convexHull(pts)
                 cv2.fillConvexPoly(mask, hull, 255)
 
-                # 指の太さをカバーするスケルトンライン描画
                 connections = mp.solutions.hands.HAND_CONNECTIONS
                 for conn in connections:
                     pt1 = pts[conn[0]]
                     pt2 = pts[conn[1]]
                     cv2.line(mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.04))
 
-            # 境界の自然なフェザリング
             mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=1)
             mask_blur = cv2.GaussianBlur(mask, (15, 15), 0)
             return (mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
@@ -323,7 +357,7 @@ class AIFaceSwapPipeline:
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
-        カメレオンAI完全再現エンジン (お面ズレゼロ・笑顔保護)
+        プロ仕様完全再現エンジン (お面ズレゼロ・口内歯保護・前髪手保護)
         """
         # A. ランドマーク平滑化 (EMA)
         kps = face.kps
@@ -359,7 +393,7 @@ class AIFaceSwapPipeline:
         # 4. 肌色トーン自動適合 (照明への同調)
         pred_bgr = apply_skin_tone_matching(pred_bgr, crop_img_128)
 
-        # 5. GFPGAN 512px 超解像 (お面ズレを根絶するため128px空間と完全同期)
+        # 5. GFPGAN 512px 超解像 (お面ズレゼロ・128px完全同期)
         use_gfpgan = (self.enable_gfpgan and self.gfpgan_session is not None)
         if use_gfpgan:
             pred_512 = cv2.resize(pred_bgr, (512, 512), interpolation=cv2.INTER_CUBIC)
@@ -381,13 +415,18 @@ class AIFaceSwapPipeline:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
 
-        # 8. 逆アフィン変換で元画像空間へ展開 (ズレのない128px基準アライメント)
+        # 8. 逆アフィン変換で元画像空間へ展開
         IM = cv2.invertAffineTransform(M128)
         h, w = img.shape[:2]
         warped_swapped = cv2.warpAffine(pred_bgr, IM, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_TRANSPARENT)
 
         # 9. フルパーツマスクの生成
         parts_mask = self._create_full_parts_mask(img.shape, face, kps)
+
+        # 10. 口内・歯・舌のリアルタイム保護 (笑顔・会話の歪み完全防止)
+        if self.enable_mouth_protection:
+            mouth_interior_mask = self._detect_mouth_interior_mask(img.shape, face)
+            parts_mask = np.clip(parts_mask * (1.0 - mouth_interior_mask), 0.0, 1.0)
 
         # 最終ブレンド合成
         result = (img.astype(np.float32) * (1.0 - parts_mask) + warped_swapped.astype(np.float32) * parts_mask).astype(np.uint8)
@@ -411,10 +450,10 @@ class AIFaceSwapPipeline:
                     # SLERP による真の潜在モーフィング
                     blended_emb = slerp_vectors(source_emb, target_emb, self.mix_ratio)
 
-                    # カメレオンAI完全再現エンジンによる顔交換
+                    # プロ仕様完全再現エンジンによる顔交換
                     swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
-            # 10. MediaPipe 手のオクルージョン保護 (手が顔の前にある時だけ最前面に残す)
+            # 11. MediaPipe 手のオクルージョン保護 (手が顔の前にある時だけ最前面に残す)
             if self.enable_face_parser and self.mp_hands is not None:
                 hand_mask = self._detect_hand_mask_mediapipe(frame)
                 if np.any(hand_mask > 0.05):
