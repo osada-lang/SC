@@ -185,17 +185,32 @@ async function populateCameraDevices() {
 }
 
 async function getCameraStream(deviceId) {
-  const constraints = [
-    { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
-    { video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
+  // 1. 指定されたデバイスがある場合は ideal 指定で試行
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { ideal: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+    } catch (e) {
+      console.warn('指定カメラでの起動失敗 ➔ 標準カメラへフォールバックします:', e);
+    }
+  }
+
+  // 2. 標準カメラでの柔軟な試行 (HD ➔ SD ➔ 任意)
+  const fallbacks = [
+    { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
+    { video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
     { video: true, audio: false }
   ];
-  for (const c of constraints) {
+
+  for (const c of fallbacks) {
     try {
       return await navigator.mediaDevices.getUserMedia(c);
     } catch (e) {}
   }
-  throw new Error('利用可能なカメラが見つかりませんでした');
+
+  throw new Error('利用可能なカメラが見つかりませんでした。ブラウザのカメラ許可設定を確認してください。');
 }
 
 // --- リアルタイム ストリーミング (高速直接パイプライン) ---
