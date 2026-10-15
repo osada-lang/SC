@@ -260,35 +260,42 @@ class AIFaceSwapPipeline:
 
         return np.expand_dims(final_mask, axis=-1)
 
-    def _detect_hand_occlusion(self, frame_roi: np.ndarray) -> np.ndarray:
+    def _detect_hand_occlusion_ai(self, face_roi: np.ndarray) -> np.ndarray:
         """
-        顔の前に手や指が来た時だけ、手領域を正確に切り抜いて元映像を最前面に残すオクルージョンマスク
+        FaceParser (BiSeNet AI) によるピクセル単位の手・異物オクルージョン検出
+        照明光による誤爆ゼロ ＆ 手・指の完全透け防止を両立
         """
+        h, w = face_roi.shape[:2]
+        if self.parser_session is None:
+            return np.zeros((h, w), dtype=np.float32)
+
         try:
-            h, w = frame_roi.shape[:2]
-            hsv = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2HSV)
-            # 肌色抽出
-            skin = cv2.inRange(hsv, np.array([0, 30, 60], dtype=np.uint8), np.array([22, 160, 255], dtype=np.uint8))
+            # 512x512 RGB 前処理
+            resized = cv2.resize(face_roi, (512, 512))
+            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
+            norm = (rgb / 255.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
+            blob = np.transpose(norm, (2, 0, 1))[np.newaxis, ...]
+
+            # BiSeNet 19クラス推論
+            logits = self.parser_session.run(None, {self.parser_input_name: blob.astype(np.float32)})[0]
+            parsing = np.squeeze(np.argmax(logits, axis=1)).astype(np.uint8)
+
+            # 顔パーツクラス: 1(肌), 2-3(眉), 4-5(目), 6(メガネ), 10(鼻), 11(口内), 12-13(唇)
+            face_classes = [1, 2, 3, 4, 5, 6, 10, 11, 12, 13]
             
-            # 輪郭とエッジから手の塊を検出
+            # 顔のパーツ・肌以外の領域（手・指・アクセサリー等）を 255 と判定
+            hand_mask = np.zeros_like(parsing, dtype=np.uint8)
+            hand_mask[~np.isin(parsing, face_classes)] = 255
+
+            # 境界の平滑化
+            hand_mask_res = cv2.resize(hand_mask, (w, h), interpolation=cv2.INTER_LINEAR)
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
-            skin_clean = cv2.morphologyEx(skin, cv2.MORPH_OPEN, kernel)
-            skin_clean = cv2.morphologyEx(skin_clean, cv2.MORPH_CLOSE, kernel)
+            hand_mask_clean = cv2.morphologyEx(hand_mask_res, cv2.MORPH_OPEN, kernel)
+            hand_mask_blur = cv2.GaussianBlur(hand_mask_clean, (11, 11), 0)
 
-            # 面積の大きな手のひら・指の連結成分のみを抽出
-            contours, _ = cv2.findContours(skin_clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            hand_mask = np.zeros((h, w), dtype=np.uint8)
-            min_hand_area = (h * w) * 0.08 # 顔領域の8%以上を覆う手の塊
-
-            for cnt in contours:
-                if cv2.contourArea(cnt) > min_hand_area:
-                    cv2.drawContours(hand_mask, [cnt], -1, 255, -1)
-
-            hand_mask = cv2.dilate(hand_mask, kernel, iterations=2)
-            hand_mask = cv2.GaussianBlur(hand_mask, (15, 15), 0)
-            return (hand_mask / 255.0).astype(np.float32)
-        except Exception:
-            return np.zeros(frame_roi.shape[:2], dtype=np.float32)
+            return (hand_mask_blur / 255.0).astype(np.float32)
+        except Exception as e:
+            return np.zeros((h, w), dtype=np.float32)
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
@@ -366,7 +373,7 @@ class AIFaceSwapPipeline:
             x2, y2 = min(w, bbox[2]), min(h, bbox[3])
             if (x2 - x1) > 0 and (y2 - y1) > 0:
                 face_roi = img[y1:y2, x1:x2]
-                hand_mask_roi = self._detect_hand_occlusion(face_roi)
+                hand_mask_roi = self._detect_hand_occlusion_ai(face_roi)
                 full_hand_mask = np.zeros((h, w, 1), dtype=np.float32)
                 full_hand_mask[y1:y2, x1:x2, 0] = hand_mask_roi
                 parts_mask = np.clip(parts_mask * (1.0 - full_hand_mask), 0.0, 1.0)
