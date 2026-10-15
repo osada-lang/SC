@@ -7,6 +7,13 @@ import onnxruntime as ort
 import insightface
 from insightface.app import FaceAnalysis
 
+# MediaPipe 手の骨格検出
+try:
+    import mediapipe as mp
+    HAS_MEDIAPIPE = True
+except ImportError:
+    HAS_MEDIAPIPE = False
+
 # =====================================================================
 # ArcFace 基準ランドマーク (Inswapper 128px & GFPGAN 512px)
 # =====================================================================
@@ -69,7 +76,7 @@ def apply_skin_tone_matching(swapped_crop: np.ndarray, original_crop: np.ndarray
 
 
 # =====================================================================
-# 統合AI顔交換パイプライン (カメレオンAI 完全再現エンジン)
+# 統合AI顔交換パイプライン (MediaPipe 手骨格追従 ＆ カメレオンAI再現エンジン)
 # =====================================================================
 class AIFaceSwapPipeline:
     def __init__(self, models_dir="models", default_target_path=None):
@@ -80,8 +87,8 @@ class AIFaceSwapPipeline:
         # パラメータ設定
         self.mix_ratio = 0.70          # 顔ミックス比率 (0.0〜1.0)
         self.enable_gfpgan = True      # GFPGAN超解像
-        self.gfpgan_weight = 0.65      # GFPGAN復元強度 (65%推奨)
-        self.enable_face_parser = True # 手の透け防止オクルージョンマスク
+        self.gfpgan_weight = 0.65      # GFPGAN復元強度
+        self.enable_face_parser = True # 手の透け防止オクルージョンマスク (MediaPipe)
         self.sharpness = 1.3           # シャープネス
         self.skin_blend = 0.15         # 元の顔馴染ませ率
         self.beauty_smooth = 0.60      # 美肌スムージング (陶器肌)
@@ -135,6 +142,21 @@ class AIFaceSwapPipeline:
                 print("[AI Pipeline] GFPGAN v1.4 超解像エンジン準備完了 (512px)")
             except Exception as e:
                 print(f"[AI Pipeline] GFPGAN 初期化警告: {e}")
+
+        # 4. MediaPipe Hands 手の骨格検出エンジン (カメレオンAIと同等)
+        self.mp_hands = None
+        if HAS_MEDIAPIPE:
+            try:
+                print("[AI Pipeline] MediaPipe Hands (手の骨格AI) を初期化中...")
+                self.mp_hands = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=2,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5
+                )
+                print("[AI Pipeline] MediaPipe Hands 準備完了 (手オクルージョン保護)")
+            except Exception as e:
+                print(f"[AI Pipeline] MediaPipe Hands 初期化警告: {e}")
 
         # ターゲット顔のキャッシュ
         self.targets = {}
@@ -211,11 +233,7 @@ class AIFaceSwapPipeline:
             "providers": self.providers
         }
 
-    def _enhance_face_gfpgan(self, cropped_face_512: np.ndarray, original_128: np.ndarray) -> np.ndarray:
-        """
-        GFPGAN v1.4 超解像:
-        目元・瞳・肌を高精細化しつつ、口元の笑顔の自然さを100%保護する
-        """
+    def _enhance_face_gfpgan(self, cropped_face_512: np.ndarray) -> np.ndarray:
         if self.gfpgan_session is None:
             return cropped_face_512
         try:
@@ -228,7 +246,6 @@ class AIFaceSwapPipeline:
             out_img = np.clip((out_img + 1.0) * 127.5, 0, 255).astype(np.uint8)
             enhanced_512 = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
 
-            # 強度ブレンド
             w = self.gfpgan_weight
             blended_512 = cv2.addWeighted(cropped_face_512, 1.0 - w, enhanced_512, w, 0)
             return blended_512
@@ -252,7 +269,6 @@ class AIFaceSwapPipeline:
 
         cv2.fillConvexPoly(mask, hull, 1.0)
 
-        # 境界のみを滑らかにフェザリング
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
         mask_inner = cv2.erode(mask, kernel, iterations=2)
         mask_blurred = cv2.GaussianBlur(mask, (21, 21), 0)
@@ -260,54 +276,54 @@ class AIFaceSwapPipeline:
 
         return np.expand_dims(final_mask, axis=-1)
 
-    def _detect_hand_occlusion_ai(self, face_roi: np.ndarray, inner_face_mask_roi: np.ndarray = None) -> np.ndarray:
+    def _detect_hand_mask_mediapipe(self, frame: np.ndarray) -> np.ndarray:
         """
-        FaceParser (BiSeNet AI) による高精度な手・指オクルージョン検出
-        通常時は顔交換を100%美しく発動し、手が顔の前に重なった時だけピンポイントで手前に残す
+        MediaPipe Hands による手の21点骨格ポリゴンマスク生成 (カメレオンAIの真の仕組み)
+        手が画面にない時は完全な 0.0 (顔交換 100% 発動・照明誤爆ゼロ)
+        手が顔の前に重なった時だけ、その指・手のひらの形を 1.0 (最前面保護)
         """
-        h, w = face_roi.shape[:2]
-        if self.parser_session is None:
-            return np.zeros((h, w), dtype=np.float32)
+        h, w = frame.shape[:2]
+        if self.mp_hands is None:
+            return np.zeros((h, w, 1), dtype=np.float32)
 
         try:
-            resized = cv2.resize(face_roi, (512, 512))
-            rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-            norm = (rgb / 255.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
-            blob = np.transpose(norm, (2, 0, 1))[np.newaxis, ...]
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.mp_hands.process(rgb)
 
-            logits = self.parser_session.run(None, {self.parser_input_name: blob.astype(np.float32)})[0]
-            parsing = np.squeeze(np.argmax(logits, axis=1)).astype(np.uint8)
+            if not results.multi_hand_landmarks:
+                return np.zeros((h, w, 1), dtype=np.float32)
 
-            # 顔パーツ・肌・髪クラス: 1(肌), 2-3(眉), 4-5(目), 10(鼻), 11(口内), 12-13(唇), 17(髪)
-            face_classes = [1, 2, 3, 4, 5, 10, 11, 12, 13, 17]
+            mask = np.zeros((h, w), dtype=np.uint8)
 
-            # 顔のインナーパーツ領域内において、顔パーツではない領域（手・指）を検出
-            hand_512 = np.zeros_like(parsing, dtype=np.uint8)
-            hand_512[~np.isin(parsing, face_classes)] = 255
+            for hand_landmarks in results.multi_hand_landmarks:
+                pts = []
+                for lm in hand_landmarks.landmark:
+                    px = int(lm.x * w)
+                    py = int(lm.y * h)
+                    pts.append([px, py])
+                
+                pts = np.array(pts, dtype=np.int32)
+                # 手のひら・指全体の凸包ポリゴン
+                hull = cv2.convexHull(pts)
+                cv2.fillConvexPoly(mask, hull, 255)
 
-            hand_res = cv2.resize(hand_512, (w, h), interpolation=cv2.INTER_NEAREST)
+                # 指の太さをカバーするスケルトンライン描画
+                connections = mp.solutions.hands.HAND_CONNECTIONS
+                for conn in connections:
+                    pt1 = pts[conn[0]]
+                    pt2 = pts[conn[1]]
+                    cv2.line(mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.04))
 
-            # インナーマスク内部の手領域のみに限定 (背景や顔の外の誤爆を100%防止)
-            if inner_face_mask_roi is not None:
-                inner_bin = (inner_face_mask_roi[:, :, 0] > 0.3).astype(np.uint8) * 255
-                hand_res = cv2.bitwise_and(hand_res, inner_bin)
-
-            # 小さなノイズを除去し、手・指のまとまった領域のみを抽出
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-            hand_clean = cv2.morphologyEx(hand_res, cv2.MORPH_OPEN, kernel)
-            
-            # 手領域が一定面積以上ある場合のみオクルージョンとして適用 (通常時は完全0)
-            if np.count_nonzero(hand_clean) < (h * w * 0.02):
-                return np.zeros((h, w), dtype=np.float32)
-
-            hand_blur = cv2.GaussianBlur(hand_clean, (15, 15), 0)
-            return (hand_blur / 255.0).astype(np.float32)
-        except Exception as e:
-            return np.zeros((h, w), dtype=np.float32)
+            # 境界の自然なフェザリング
+            mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)), iterations=1)
+            mask_blur = cv2.GaussianBlur(mask, (15, 15), 0)
+            return (mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
+        except Exception:
+            return np.zeros((h, w, 1), dtype=np.float32)
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
-        カメレオンAI完全再現エンジン (お面ズレゼロ・笑顔保護・手の透け防止)
+        カメレオンAI完全再現エンジン (お面ズレゼロ・笑顔保護)
         """
         # A. ランドマーク平滑化 (EMA)
         kps = face.kps
@@ -347,8 +363,7 @@ class AIFaceSwapPipeline:
         use_gfpgan = (self.enable_gfpgan and self.gfpgan_session is not None)
         if use_gfpgan:
             pred_512 = cv2.resize(pred_bgr, (512, 512), interpolation=cv2.INTER_CUBIC)
-            enhanced_512 = self._enhance_face_gfpgan(pred_512, crop_img_128)
-            # 512pxの超解像結果を128pxの完全な座標系へ正確にマッピング (ズレゼロ)
+            enhanced_512 = self._enhance_face_gfpgan(pred_512)
             pred_bgr = cv2.resize(enhanced_512, (128, 128), interpolation=cv2.INTER_AREA)
 
         # 6. 美肌スムージング (陶器肌) & トーンアップ美白
@@ -374,19 +389,6 @@ class AIFaceSwapPipeline:
         # 9. フルパーツマスクの生成
         parts_mask = self._create_full_parts_mask(img.shape, face, kps)
 
-        # 10. 手のオクルージョン保護 (手の透け防止)
-        if self.enable_face_parser:
-            bbox = face.bbox.astype(int)
-            x1, y1 = max(0, bbox[0]), max(0, bbox[1])
-            x2, y2 = min(w, bbox[2]), min(h, bbox[3])
-            if (x2 - x1) > 0 and (y2 - y1) > 0:
-                face_roi = img[y1:y2, x1:x2]
-                mask_roi = parts_mask[y1:y2, x1:x2]
-                hand_mask_roi = self._detect_hand_occlusion_ai(face_roi, mask_roi)
-                full_hand_mask = np.zeros((h, w, 1), dtype=np.float32)
-                full_hand_mask[y1:y2, x1:x2, 0] = hand_mask_roi
-                parts_mask = np.clip(parts_mask * (1.0 - full_hand_mask), 0.0, 1.0)
-
         # 最終ブレンド合成
         result = (img.astype(np.float32) * (1.0 - parts_mask) + warped_swapped.astype(np.float32) * parts_mask).astype(np.uint8)
         return result
@@ -411,6 +413,12 @@ class AIFaceSwapPipeline:
 
                     # カメレオンAI完全再現エンジンによる顔交換
                     swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
+
+            # 10. MediaPipe 手のオクルージョン保護 (手が顔の前にある時だけ最前面に残す)
+            if self.enable_face_parser and self.mp_hands is not None:
+                hand_mask = self._detect_hand_mask_mediapipe(frame)
+                if np.any(hand_mask > 0.05):
+                    swapped_frame = (swapped_frame.astype(np.float32) * (1.0 - hand_mask) + frame.astype(np.float32) * hand_mask).astype(np.uint8)
 
         except Exception as e:
             print(f"[AI Pipeline エラー] {e}")
