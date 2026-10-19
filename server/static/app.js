@@ -216,32 +216,41 @@ async function populateCameraDevices() {
 }
 
 async function getCameraStream(deviceId) {
-  // 1. 指定されたデバイスがある場合は ideal 指定で試行
-  if (deviceId) {
+  let lastError = null;
+
+  // 1. 指定デバイスがあれば ideal で試す
+  if (deviceId && deviceId.trim() !== '') {
     try {
+      console.log('[カメラ] 指定デバイスで試行:', deviceId);
       return await navigator.mediaDevices.getUserMedia({
         video: { deviceId: { ideal: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false
       });
     } catch (e) {
-      console.warn('指定カメラでの起動失敗 ➔ 標準カメラへフォールバックします:', e);
+      console.warn('[カメラ] 指定デバイス試行失敗:', e);
+      lastError = e;
     }
   }
 
-  // 2. 標準カメラでの柔軟な試行 (HD ➔ SD ➔ 任意)
-  const fallbacks = [
+  // 2. 最もシンプルな標準カメラ要求 (ブラウザの許可プロンプトを最優先トリガー)
+  const attempts = [
+    { video: true, audio: false },
     { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false },
-    { video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false },
-    { video: true, audio: false }
+    { video: { width: { ideal: 640 }, height: { ideal: 480 } }, audio: false }
   ];
 
-  for (const c of fallbacks) {
+  for (const constraints of attempts) {
     try {
-      return await navigator.mediaDevices.getUserMedia(c);
-    } catch (e) {}
+      console.log('[カメラ] 標準制約で試行:', constraints);
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (e) {
+      console.warn('[カメラ] 制約試行失敗:', constraints, e);
+      lastError = e;
+    }
   }
 
-  throw new Error('利用可能なカメラが見つかりませんでした。ブラウザのカメラ許可設定を確認してください。');
+  const errDetail = lastError ? `${lastError.name}: ${lastError.message}` : 'カメラが見つかりません';
+  throw new Error(`利用可能なカメラが見つかりませんでした (${errDetail})。\nブラウザのカメラ許可設定を確認してください。`);
 }
 
 // --- リアルタイム ストリーミング (高速直接パイプライン) ---
