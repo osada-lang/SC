@@ -71,17 +71,33 @@
           </div>
         </div>
 
-        <div class="camera-select-bar">
-          <label for="cameraSelect">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M23 7l-7 5 7 5V7z"></path>
-              <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-            </svg>
-            カメラ選択:
-          </label>
-          <select id="cameraSelect" class="form-select">
-            <option value="">カメラを検出中...</option>
-          </select>
+        <div class="device-select-container">
+          <div class="camera-select-bar">
+            <label for="cameraSelect">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M23 7l-7 5 7 5V7z"></path>
+                <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+              </svg>
+              カメラ:
+            </label>
+            <select id="cameraSelect" class="form-select">
+              <option value="">カメラを検出中...</option>
+            </select>
+          </div>
+          <div class="camera-select-bar">
+            <label for="audioSelect">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="8" y1="23" x2="16" y2="23"></line>
+              </svg>
+              マイク:
+            </label>
+            <select id="audioSelect" class="form-select">
+              <option value="">マイクを検出中...</option>
+            </select>
+          </div>
         </div>
 
         <div class="video-controls">

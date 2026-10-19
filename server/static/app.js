@@ -13,6 +13,7 @@ const btnStop = document.getElementById('btnStop');
 const btnToggleSource = document.getElementById('btnToggleSource');
 const btnShutdown = document.getElementById('btnShutdown');
 const cameraSelect = document.getElementById('cameraSelect');
+const audioSelect = document.getElementById('audioSelect');
 
 const connectionStatus = document.getElementById('connectionStatus');
 const statLatency = document.getElementById('statLatency');
@@ -172,24 +173,44 @@ sliderSkinBlend.addEventListener('input', (e) => {
   pushSettings();
 });
 
-// --- カメラデバイスの検出 ---
+// --- カメラ＆マイクデバイスの検出 ---
 async function populateCameraDevices() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
+    
+    // カメラ
     const videoDevices = devices.filter(d => d.kind === 'videoinput');
-    if (videoDevices.length === 0) return;
+    if (videoDevices.length > 0) {
+      const currentCam = cameraSelect.value;
+      cameraSelect.innerHTML = '';
+      videoDevices.forEach((dev, index) => {
+        const opt = document.createElement('option');
+        opt.value = dev.deviceId;
+        opt.textContent = dev.label || `カメラ ${index + 1}`;
+        cameraSelect.appendChild(opt);
+      });
+      if (currentCam && Array.from(cameraSelect.options).some(o => o.value === currentCam)) {
+        cameraSelect.value = currentCam;
+      }
+    }
 
-    const currentVal = cameraSelect.value;
-    cameraSelect.innerHTML = '';
-    videoDevices.forEach((dev, index) => {
-      const opt = document.createElement('option');
-      opt.value = dev.deviceId;
-      opt.textContent = dev.label || `カメラ ${index + 1}`;
-      cameraSelect.appendChild(opt);
-    });
-    if (currentVal && Array.from(cameraSelect.options).some(o => o.value === currentVal)) {
-      cameraSelect.value = currentVal;
+    // マイク
+    if (audioSelect) {
+      const audioDevices = devices.filter(d => d.kind === 'audioinput');
+      if (audioDevices.length > 0) {
+        const currentMic = audioSelect.value;
+        audioSelect.innerHTML = '';
+        audioDevices.forEach((dev, index) => {
+          const opt = document.createElement('option');
+          opt.value = dev.deviceId;
+          opt.textContent = dev.label || `マイク ${index + 1}`;
+          audioSelect.appendChild(opt);
+        });
+        if (currentMic && Array.from(audioSelect.options).some(o => o.value === currentMic)) {
+          audioSelect.value = currentMic;
+        }
+      }
     }
   } catch (e) {}
 }

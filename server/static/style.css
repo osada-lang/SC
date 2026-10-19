@@ -220,6 +220,12 @@ body {
   font-size: 0.85rem;
 }
 
+.device-select-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .camera-select-bar {
   display: flex;
   align-items: center;
