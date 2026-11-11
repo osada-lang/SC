@@ -192,6 +192,7 @@ async def api_settings(settings: dict):
         mix_ratio=settings.get("mix_ratio"),
         enable_gfpgan=settings.get("enable_gfpgan"),
         gfpgan_weight=settings.get("gfpgan_weight"),
+        enable_poisson=settings.get("enable_poisson"),
         enable_face_parser=settings.get("enable_face_parser"),
         exclude_mouth=settings.get("exclude_mouth"),
         sharpness=settings.get("sharpness"),

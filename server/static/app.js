@@ -29,6 +29,7 @@ const mixRatioVal = document.getElementById('mixRatioVal');
 const toggleGFPGAN = document.getElementById('toggleGFPGAN');
 const sliderGFPGANWeight = document.getElementById('sliderGFPGANWeight');
 const gfpganWeightVal = document.getElementById('gfpganWeightVal');
+const togglePoisson = document.getElementById('togglePoisson');
 const toggleFaceParser = document.getElementById('toggleFaceParser');
 const toggleExcludeMouth = document.getElementById('toggleExcludeMouth');
 const sliderBeautySmooth = document.getElementById('sliderBeautySmooth');
@@ -132,6 +133,7 @@ async function pushSettings() {
         mix_ratio: parseInt(sliderMixRatio.value, 10) / 100.0,
         enable_gfpgan: toggleGFPGAN.checked,
         gfpgan_weight: parseInt(sliderGFPGANWeight.value, 10) / 100.0,
+        enable_poisson: togglePoisson ? togglePoisson.checked : true,
         enable_face_parser: toggleFaceParser.checked,
         exclude_mouth: toggleExcludeMouth ? toggleExcludeMouth.checked : true,
         sharpness: parseInt(sliderSharpness.value, 10) / 10.0,
@@ -154,6 +156,7 @@ sliderGFPGANWeight.addEventListener('input', (e) => {
   gfpganWeightVal.textContent = `${e.target.value}%`;
   pushSettings();
 });
+if (togglePoisson) togglePoisson.addEventListener('change', pushSettings);
 toggleFaceParser.addEventListener('change', pushSettings);
 if (toggleExcludeMouth) toggleExcludeMouth.addEventListener('change', pushSettings);
 sliderBeautySmooth.addEventListener('input', (e) => {
