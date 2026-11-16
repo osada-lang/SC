@@ -15,7 +15,7 @@ except ImportError:
     HAS_MEDIAPIPE = False
 
 # =====================================================================
-# ArcFace 基準ランドマーク (Inswapper 128px & GFPGAN 512px)
+# ArcFace 基準ランドマーク (Inswapper 128px & SimSwap 512px)
 # =====================================================================
 ARCFACE_DST_128 = np.array([
     [38.2946, 51.6963],
@@ -25,7 +25,15 @@ ARCFACE_DST_128 = np.array([
     [70.7299, 92.2041]
 ], dtype=np.float32)
 
-ARCFACE_DST_512 = ARCFACE_DST_128 * 4.0
+ARCFACE_DST_112 = np.array([
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041]
+], dtype=np.float32)
+
+ARCFACE_DST_512 = ARCFACE_DST_112 * (512.0 / 112.0)
 
 
 # =====================================================================
@@ -168,7 +176,26 @@ class AIFaceSwapPipeline:
         except Exception as e:
             print(f"[AI Pipeline Pro] emap 抽出警告: {e}")
 
-        # 3. GFPGAN v1.4 超解像モデル (512px)
+        # 3. SimSwap 512 ネイティブ高解像度モデル & ArcFace Converter
+        simswap_path = os.path.join(models_dir, "simswap_unofficial_512.onnx")
+        converter_path = os.path.join(models_dir, "arcface_converter_simswap.onnx")
+        self.use_simswap = False
+        self.simswap_session = None
+        self.converter_session = None
+
+        if os.path.exists(simswap_path) and os.path.exists(converter_path):
+            try:
+                print("[AI Pipeline Pro] SimSwap 512 (ネイティブ512px高解像度モデル) を初期化中...")
+                self.simswap_session = ort.InferenceSession(simswap_path, providers=self.providers, sess_options=sess_opts)
+                self.converter_session = ort.InferenceSession(converter_path, providers=self.providers, sess_options=sess_opts)
+                self.simswap_target_name = self.simswap_session.get_inputs()[0].name
+                self.simswap_source_name = self.simswap_session.get_inputs()[1].name
+                self.use_simswap = True
+                print("🎉 [AI Pipeline Pro] SimSwap 512 (ネイティブ512px高解像度) エンジンスワップ完了！")
+            except Exception as e:
+                print(f"[AI Pipeline Pro] SimSwap 512 初期化警告 (Inswapper 128にフォールバック): {e}")
+
+        # 4. GFPGAN v1.4 超解像モデル (512px)
         gfpgan_path = os.path.join(models_dir, "GFPGANv1.4.onnx")
         self.gfpgan_session = None
         if os.path.exists(gfpgan_path):
@@ -279,6 +306,7 @@ class AIFaceSwapPipeline:
             "concealer_strength": self.concealer_strength,
             "lip_tint": self.lip_tint,
             "blush_tint": self.blush_tint,
+            "active_engine": "SimSwap 512 (ネイティブ512px高解像度)" if self.use_simswap else "Inswapper 128",
             "providers": self.providers
         }
 
@@ -541,6 +569,78 @@ class AIFaceSwapPipeline:
         result = (img.astype(np.float32) * (1.0 - final_parts_mask) + warped_swapped.astype(np.float32) * final_parts_mask).astype(np.uint8)
         return result
 
+    def _swap_face_simswap_512(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
+        """
+        SimSwap 512px ネイティブ高解像度顔交換エンジン (Inswapperの16倍の高精細＆自然な造形)
+        """
+        kps = face.kps
+        if self.prev_kps is not None:
+            velocity = np.linalg.norm(kps - self.prev_kps)
+            alpha = np.clip(0.65 + (velocity / 20.0) * 0.30, 0.65, 0.95)
+            kps = self.prev_kps * (1.0 - alpha) + kps * alpha
+        self.prev_kps = kps
+
+        # 1. 512px 基準アライメント行列
+        M512, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_512)
+        if M512 is None:
+            return img
+
+        # 2. クロップ (512x512)
+        crop_img_512 = cv2.warpAffine(img, M512, (512, 512), borderMode=cv2.BORDER_REPLICATE)
+
+        # 3. 前処理 (ImageNet正規化: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        crop_rgb = cv2.cvtColor(crop_img_512, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        norm_rgb = (crop_rgb - mean) / std
+        blob_512 = np.transpose(norm_rgb, (2, 0, 1))[np.newaxis, ...]
+
+        # 4. 特徴量変換 (ArcFace ➔ SimSwap 特徴ベクトル変換)
+        source_emb = latent_embedding.reshape(1, -1).astype(np.float32)
+        converted_emb = self.converter_session.run(None, {'input': source_emb})[0]
+        converted_emb = converted_emb / (np.linalg.norm(converted_emb) + 1e-6)
+
+        # 5. SimSwap 512 推論
+        pred = self.simswap_session.run(None, {
+            self.simswap_target_name: blob_512,
+            self.simswap_source_name: converted_emb
+        })[0][0]
+
+        # 6. 逆正規化 (512x512 BGR)
+        pred_rgb = np.transpose(pred, (1, 2, 0))
+        if pred_rgb.min() < -0.1:
+            pred_rgb = np.clip((pred_rgb * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
+        else:
+            pred_rgb = np.clip(pred_rgb * 255.0, 0, 255).astype(np.uint8)
+        pred_bgr_512 = cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR)
+
+        # 7. Reinhard LAB カラーマッチング (本人の肌色・明度・血色感に100%完全同化)
+        pred_bgr_512 = apply_reinhard_color_transfer(pred_bgr_512, crop_img_512)
+
+        # 8. 美肌スムージング (陶器肌)
+        if self.beauty_smooth > 0:
+            smoothed = cv2.bilateralFilter(pred_bgr_512, d=7, sigmaColor=30, sigmaSpace=30)
+            pred_bgr_512 = cv2.addWeighted(pred_bgr_512, 1.0 - self.beauty_smooth * 0.4, smoothed, self.beauty_smooth * 0.4, 0)
+
+        # 9. 逆アフィン変換で元画像空間へ展開 (512px高解像度逆変換)
+        IM512 = cv2.invertAffineTransform(M512)
+        h, w = img.shape[:2]
+
+        crop_valid_mask = np.zeros((512, 512), dtype=np.float32)
+        cv2.circle(crop_valid_mask, (256, 256), 235, 1.0, -1)
+        crop_valid_mask = cv2.GaussianBlur(crop_valid_mask, (25, 25), 0)
+
+        warped_swapped = cv2.warpAffine(pred_bgr_512, IM512, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_valid = cv2.warpAffine(crop_valid_mask, IM512, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_valid = np.expand_dims(warped_valid, axis=-1)
+
+        # 10. パーツマスク生成 (口元除外を含む)
+        parts_mask = self._create_full_parts_mask(img.shape, face, kps)
+        final_parts_mask = parts_mask * warped_valid
+
+        result = (img.astype(np.float32) * (1.0 - final_parts_mask) + warped_swapped.astype(np.float32) * final_parts_mask).astype(np.uint8)
+        return result
+
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
         start_time = time.time()
         
@@ -559,8 +659,11 @@ class AIFaceSwapPipeline:
                     # SLERP による真の潜在モーフィング
                     blended_emb = slerp_vectors(source_emb, target_emb, self.mix_ratio)
 
-                    # 自然肌色＆完全同化エンジンによる顔交換
-                    swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
+                    # SimSwap 512px または Inswapper 128 による顔交換
+                    if self.use_simswap and self.simswap_session is not None:
+                        swapped_frame = self._swap_face_simswap_512(swapped_frame, face, blended_emb)
+                    else:
+                        swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
             # 12. 手のひら・指のオクルージョン保護
             if self.enable_face_parser and self.mp_hands is not None:
