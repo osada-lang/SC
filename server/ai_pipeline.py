@@ -55,33 +55,29 @@ def slerp_vectors(v0: np.ndarray, v1: np.ndarray, t: float, dot_threshold=0.9995
 
 
 # =====================================================================
-# 2. LAB色空間 カラー ＆ CLAHE局所コントラスト適応 (照明・陰影完全同期)
+# 2. 完全同化 Reinhard LAB カラー ＆ ライティングマッチング (お面感・白浮きの完全消滅)
 # =====================================================================
-def apply_lab_and_clahe_matching(swapped_crop: np.ndarray, original_crop: np.ndarray) -> np.ndarray:
+def apply_reinhard_color_transfer(swapped_crop: np.ndarray, original_crop: np.ndarray) -> np.ndarray:
+    """
+    ターゲット顔の色・明るさ・血色感を、配信者自身の首・頬・部屋の照明に100%完全同化させる数学的変換
+    """
     try:
         src_lab = cv2.cvtColor(swapped_crop, cv2.COLOR_BGR2LAB).astype(np.float32)
         ref_lab = cv2.cvtColor(original_crop, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        src_mean = src_lab.mean(axis=(0, 1))
-        ref_mean = ref_lab.mean(axis=(0, 1))
+        src_mean, src_std = src_lab.mean(axis=(0, 1)), src_lab.std(axis=(0, 1)) + 1e-5
+        ref_mean, ref_std = ref_lab.mean(axis=(0, 1)), ref_lab.std(axis=(0, 1)) + 1e-5
 
-        # 色調の平均トーンを部屋の照明に同調
-        matched_lab = src_lab.copy()
-        matched_lab[:, :, 0] = np.clip(matched_lab[:, :, 0] - src_mean[0] + ref_mean[0], 0, 255)
-        matched_lab[:, :, 1] = np.clip(matched_lab[:, :, 1] - src_mean[1] + ref_mean[1], 0, 255)
-        matched_lab[:, :, 2] = np.clip(matched_lab[:, :, 2] - src_mean[2] + ref_mean[2], 0, 255)
-
-        # CLAHE (局所適応ヒストグラム平滑化) で部屋の陰影の深さを顔に同期
-        clahe = cv2.createCLAHE(clipLimit=1.4, tileGridSize=(8, 8))
-        matched_lab[:, :, 0] = clahe.apply(matched_lab[:, :, 0].astype(np.uint8)).astype(np.float32)
-
-        return cv2.cvtColor(matched_lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        # 各チャンネル (L:明度, A:緑-赤, B:青-黄) の平均・分散を本人の肌に完全一致
+        matched_lab = (src_lab - src_mean) * (ref_std / src_std) + ref_mean
+        matched_lab = np.clip(matched_lab, 0, 255).astype(np.uint8)
+        return cv2.cvtColor(matched_lab, cv2.COLOR_LAB2BGR)
     except Exception:
         return swapped_crop
 
 
 # =====================================================================
-# 統合AI顔交換パイプライン (カメレオンAI 完全網羅プロ仕様版)
+# 統合AI顔交換パイプライン (カメレオンAI 完全同等 自然肌色版)
 # =====================================================================
 class AIFaceSwapPipeline:
     def __init__(self, models_dir="models", default_target_path=None):
@@ -89,16 +85,16 @@ class AIFaceSwapPipeline:
         self.providers = self._get_optimal_providers()
         print(f"[AI Pipeline Pro] 使用プロバイダー: {self.providers}")
 
-        # パラメータ設定
+        # パラメータ設定 (白浮きゼロ・自然肌色デフォルト)
         self.mix_ratio = 0.70          # 顔ミックス比率 (0.0〜1.0)
         self.enable_gfpgan = True      # GFPGAN超解像
-        self.gfpgan_weight = 0.70      # GFPGAN復元強度
-        self.enable_face_parser = True # 手の透け防止オクルージョンマスク (MediaPipe面結合)
+        self.gfpgan_weight = 0.65      # GFPGAN復元強度
+        self.enable_face_parser = True # 手の透け防止オクルージョンマスク (MediaPipe)
         self.exclude_mouth = True      # 口元・唇・歯の完全保護
-        self.sharpness = 1.3           # シャープネス
+        self.sharpness = 1.2           # シャープネス
         self.skin_blend = 0.15         # 元の顔馴染ませ率
-        self.beauty_smooth = 0.60      # 美肌スムージング (陶器肌)
-        self.beauty_whitening = 0.20   # トーンアップ美白
+        self.beauty_smooth = 0.50      # 美肌スムージング (陶器肌)
+        self.beauty_whitening = 0.00   # トーンアップ美白 (白浮き防止のためデフォルト0%)
 
         # 動的アダプティブEMA追従フィルター
         self.prev_kps = None
@@ -172,7 +168,7 @@ class AIFaceSwapPipeline:
             self.set_target_from_file("default", default_target_path)
 
         self.last_frame_time = time.time()
-        print("[AI Pipeline Pro] パイプライン準備完了 (カメレオンAI 完全網羅プロ仕様)")
+        print("[AI Pipeline Pro] パイプライン準備完了 (自然肌色＆完全同化版)")
 
     def _get_optimal_providers(self):
         available = ort.get_available_providers()
@@ -261,17 +257,13 @@ class AIFaceSwapPipeline:
             return cropped_face_512
 
     def _apply_eye_micro_sharpness(self, face_bgr_128: np.ndarray) -> np.ndarray:
-        """
-        瞳・目元限定マイクロ高周波シャープネス (目に生きた人間のツヤ・キャッチライトを与える)
-        """
         try:
             h, w = face_bgr_128.shape[:2]
             eye_y1, eye_y2 = int(h * 0.28), int(h * 0.58)
             eye_roi = face_bgr_128[eye_y1:eye_y2, :].copy()
 
-            # 高周波エッジ強調 (瞳のハイライトとまつ毛をクッキリ)
             gaussian = cv2.GaussianBlur(eye_roi, (0, 0), 1.0)
-            sharp_eye = cv2.addWeighted(eye_roi, 1.45, gaussian, -0.45, 0)
+            sharp_eye = cv2.addWeighted(eye_roi, 1.35, gaussian, -0.35, 0)
             face_bgr_128[eye_y1:eye_y2, :] = sharp_eye
             return face_bgr_128
         except Exception:
@@ -279,7 +271,7 @@ class AIFaceSwapPipeline:
 
     def _create_full_parts_mask(self, img_shape, face, kps):
         """
-        目・眉・鼻・唇・口角を包み込むインナーパーツマスク
+        目・眉・鼻・唇・口角を包み込むインナーパーツマスク (輪郭・アゴの地肌と100%一体化)
         """
         h, w = img_shape[:2]
         mask = np.zeros((h, w), dtype=np.float32)
@@ -289,12 +281,12 @@ class AIFaceSwapPipeline:
             hull = cv2.convexHull(pts)
         else:
             center = kps.mean(axis=0)
-            expanded = center + (kps - center) * 1.55
+            expanded = center + (kps - center) * 1.45
             hull = cv2.convexHull(expanded.astype(np.int32))
 
         cv2.fillConvexPoly(mask, hull, 1.0)
 
-        # 口元除外処理 (口・歯・唇は本人100%キープ)
+        # 口元除外処理 (唇・歯・口角をマスクから自然にくり抜き)
         if self.exclude_mouth and hasattr(face, 'landmark_2d_106') and face.landmark_2d_106 is not None:
             lmk = face.landmark_2d_106.astype(np.int32)
             mouth_indices = list(range(52, min(72, len(lmk))))
@@ -303,15 +295,15 @@ class AIFaceSwapPipeline:
             mouth_hull = cv2.convexHull(mouth_pts)
             mouth_mask = np.zeros((h, w), dtype=np.uint8)
             cv2.fillConvexPoly(mouth_mask, mouth_hull, 255)
-            mouth_mask = cv2.dilate(mouth_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)), iterations=1)
-            mouth_mask_blur = cv2.GaussianBlur(mouth_mask, (11, 11), 0) / 255.0
+            mouth_mask = cv2.dilate(mouth_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)), iterations=1)
+            mouth_mask_blur = cv2.GaussianBlur(mouth_mask, (15, 15), 0) / 255.0
 
             mask = np.clip(mask * (1.0 - mouth_mask_blur), 0.0, 1.0)
 
-        # 境界フェザリング
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (13, 13))
+        # 境界の広めフェザリング (首・頬との境界線を完全消去)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
         mask_inner = cv2.erode(mask, kernel, iterations=1)
-        mask_blurred = cv2.GaussianBlur(mask, (21, 21), 0)
+        mask_blurred = cv2.GaussianBlur(mask, (25, 25), 0)
         final_mask = np.maximum(mask_inner, mask_blurred)
 
         return np.expand_dims(final_mask, axis=-1)
@@ -339,22 +331,18 @@ class AIFaceSwapPipeline:
                     px = int(lm.x * w)
                     py = int(lm.y * h)
                     pts.append([px, py])
-                    # 関節・指先の球体肉厚カバー (十分な太さで保護)
                     cv2.circle(solid_mask, (px, py), int(w * 0.045), 255, -1)
                 
                 pts = np.array(pts, dtype=np.int32)
-                # 手のひら全体の凸包ポリゴン
                 hull = cv2.convexHull(pts)
                 cv2.fillConvexPoly(solid_mask, hull, 255)
 
-                # 指の骨格太線 (太さ w * 0.08 で肉厚を完全カバー)
                 connections = mp.solutions.hands.HAND_CONNECTIONS
                 for conn in connections:
                     pt1 = pts[conn[0]]
                     pt2 = pts[conn[1]]
                     cv2.line(solid_mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.08))
 
-            # 境界の膨張と滑らかなフェザリング (透け漏れ完全カット)
             solid_mask = cv2.dilate(solid_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)), iterations=2)
             solid_mask_blur = cv2.GaussianBlur(solid_mask, (11, 11), 0)
             return (solid_mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
@@ -363,13 +351,12 @@ class AIFaceSwapPipeline:
 
     def _swap_face_direct(self, img: np.ndarray, face, latent_embedding: np.ndarray) -> np.ndarray:
         """
-        カメレオンAI完全網羅プロ仕様エンジン
+        カメレオンAI完全同等 自然肌色エンジン (白浮きゼロ・地肌同化)
         """
-        # A. 動的アダプティブEMA追従フィルター (静止時は完全固定・動いた瞬間は遅延ゼロ追従)
+        # A. 動的アダプティブEMA追従フィルター
         kps = face.kps
         if self.prev_kps is not None:
             velocity = np.linalg.norm(kps - self.prev_kps)
-            # 移動速度に応じた適応係数 (静止時 0.65 ➔ 素早い動き時 0.95)
             alpha = np.clip(0.65 + (velocity / 20.0) * 0.30, 0.65, 0.95)
             kps = self.prev_kps * (1.0 - alpha) + kps * alpha
         self.prev_kps = kps
@@ -399,8 +386,8 @@ class AIFaceSwapPipeline:
         pred_img = np.squeeze(pred, axis=0).transpose(1, 2, 0)
         pred_bgr = cv2.cvtColor(np.clip(pred_img * 255.0, 0, 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
-        # 4. LAB照明・CLAHE局所コントラスト適応 (部屋の陰影の深さに完全同期)
-        pred_bgr = apply_lab_and_clahe_matching(pred_bgr, crop_img_128)
+        # 4. 【最重要】Reinhard LABカラーマッチング (本人の肌色・明度・血色感に100%完全同化)
+        pred_bgr = apply_reinhard_color_transfer(pred_bgr, crop_img_128)
 
         # 5. GFPGAN 512px 超解像 (毛穴・まつ毛・瞳の高精細化)
         use_gfpgan = (self.enable_gfpgan and self.gfpgan_session is not None)
@@ -409,25 +396,26 @@ class AIFaceSwapPipeline:
             enhanced_512 = self._enhance_face_gfpgan(pred_512)
             pred_bgr = cv2.resize(enhanced_512, (128, 128), interpolation=cv2.INTER_AREA)
 
-        # 6. 瞳・目元限定マイクロシャープネス (生気・ツヤ・瞳の光)
+        # 6. 瞳・目元限定マイクロシャープネス
         pred_bgr = self._apply_eye_micro_sharpness(pred_bgr)
 
-        # 7. 美肌スムージング (陶器肌) & トーンアップ美白
+        # 7. 美肌スムージング (陶器肌)
         if self.beauty_smooth > 0:
-            smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=35, sigmaSpace=35)
-            pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth * 0.6, smoothed, self.beauty_smooth * 0.6, 0)
+            smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=30, sigmaSpace=30)
+            pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth * 0.5, smoothed, self.beauty_smooth * 0.5, 0)
 
+        # 8. トーンアップ美白 (白浮きを防ぐ微細調整)
         if self.beauty_whitening > 0:
             hsv = cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
-            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.15), 0, 255)
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.10), 0, 255)
             pred_bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-        # 8. シャープネス強調
+        # 9. シャープネス強調
         if self.sharpness > 1.0:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
 
-        # 9. 逆アフィン変換で元画像空間へ展開 (境界クランプで紫色ノイズ完全ゼロ化)
+        # 10. 逆アフィン変換で元画像空間へ展開
         IM = cv2.invertAffineTransform(M128)
         h, w = img.shape[:2]
         
@@ -439,7 +427,7 @@ class AIFaceSwapPipeline:
         warped_valid = cv2.warpAffine(crop_valid_mask, IM, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
         warped_valid = np.expand_dims(warped_valid, axis=-1)
 
-        # 10. パーツマスク生成 (口元除外を含む)
+        # 11. パーツマスク生成 (お面感を消し去る自然なグラデーション)
         parts_mask = self._create_full_parts_mask(img.shape, face, kps)
         final_parts_mask = parts_mask * warped_valid
 
@@ -465,10 +453,10 @@ class AIFaceSwapPipeline:
                     # SLERP による真の潜在モーフィング
                     blended_emb = slerp_vectors(source_emb, target_emb, self.mix_ratio)
 
-                    # カメレオンAI完全網羅プロ仕様エンジンによる顔交換
+                    # 自然肌色＆完全同化エンジンによる顔交換
                     swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
 
-            # 11. 手のひら・指の肉厚完全面結合オクルージョン保護 (手の透けを物理的ゼロ化)
+            # 12. 手のひら・指のオクルージョン保護
             if self.enable_face_parser and self.mp_hands is not None:
                 hand_mask = self._detect_hand_mask_solid(frame)
                 if np.any(hand_mask > 0.05):
