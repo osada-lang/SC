@@ -7,22 +7,22 @@ echo "=================================================="
 echo "  LiveChat AI - 完全版モデルの自動ダウンロード"
 echo "=================================================="
 
-# 1. SimSwap 512 (ネイティブ512px高解像度モデル 約239MB)
-if [ ! -s "models/simswap_unofficial_512.onnx" ] || [ $(stat -c%s "models/simswap_unofficial_512.onnx" 2>/dev/null || stat -f%z "models/simswap_unofficial_512.onnx" 2>/dev/null || echo 0) -lt 200000000 ]; then
-    echo "[1/4] SimSwap 512 (512px高解像度モデル) をダウンロード中 (約239MB)..."
-    rm -f models/simswap_unofficial_512.onnx
-    wget -q --show-progress -O models/simswap_unofficial_512.onnx "https://huggingface.co/LPDoctor/simswap_official/resolve/main/simswap_unofficial_512.onnx"
+# 1. Ghost 256 (カメレオンAI同系列 本命モデル 約739MB)
+if [ ! -s "models/ghost_2_256.onnx" ] || [ $(stat -c%s "models/ghost_2_256.onnx" 2>/dev/null || stat -f%z "models/ghost_2_256.onnx" 2>/dev/null || echo 0) -lt 500000000 ]; then
+    echo "[1/4] Ghost 256 (カメレオンAI同系列モデル) をダウンロード中 (約739MB)..."
+    rm -f models/ghost_2_256.onnx
+    wget -q --show-progress -O models/ghost_2_256.onnx "https://huggingface.co/facefusion/models-3.0.0/resolve/main/ghost_2_256.onnx"
 else
-    echo "✓ SimSwap 512 は準備完了です。"
+    echo "✓ Ghost 256 は準備完了です。"
 fi
 
-# 2. ArcFace to SimSwap Embedding Converter (約21MB)
-if [ ! -s "models/arcface_converter_simswap.onnx" ] || [ $(stat -c%s "models/arcface_converter_simswap.onnx" 2>/dev/null || stat -f%z "models/arcface_converter_simswap.onnx" 2>/dev/null || echo 0) -lt 15000000 ]; then
-    echo "[2/4] ArcFace-to-SimSwap 特徴変換コンバーターをダウンロード中 (約21MB)..."
-    rm -f models/arcface_converter_simswap.onnx
-    wget -q --show-progress -O models/arcface_converter_simswap.onnx "https://huggingface.co/facefusion/models-3.0.0/resolve/main/arcface_converter_simswap.onnx"
+# 2. ArcFace to Ghost Embedding Converter (約21MB)
+if [ ! -s "models/arcface_converter_ghost.onnx" ] || [ $(stat -c%s "models/arcface_converter_ghost.onnx" 2>/dev/null || stat -f%z "models/arcface_converter_ghost.onnx" 2>/dev/null || echo 0) -lt 15000000 ]; then
+    echo "[2/4] ArcFace-to-Ghost 特徴変換コンバーターをダウンロード中 (約21MB)..."
+    rm -f models/arcface_converter_ghost.onnx
+    wget -q --show-progress -O models/arcface_converter_ghost.onnx "https://huggingface.co/facefusion/models-3.0.0/resolve/main/arcface_converter_ghost.onnx"
 else
-    echo "✓ ArcFace Converter は準備完了です。"
+    echo "✓ ArcFace to Ghost Converter は準備完了です。"
 fi
 
 # 3. GFPGAN v1.4 超解像・目元高画質化 (約340MB 完全バイナリ)
