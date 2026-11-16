@@ -95,7 +95,7 @@ class AIFaceSwapPipeline:
         self.skin_blend = 0.15         # 元の顔馴染ませ率
         self.beauty_smooth = 0.50      # 美肌スムージング (陶器肌)
         self.beauty_whitening = 0.00   # トーンアップ美白
-        self.concealer_strength = 0.70 # 口元影・髭ノイズ消去コンシーラー (0.0〜1.0)
+        self.concealer_strength = 1.00 # 口元影・髭ノイズ消去コンシーラー (デフォルト100%)
         self.lip_tint = 0.35           # 血色リップグロス・ティント (0.0〜1.0)
         self.blush_tint = 0.25         # ふんわり血色チーク (0.0〜1.0)
 
@@ -291,23 +291,24 @@ class AIFaceSwapPipeline:
         try:
             h, w = face_bgr_128.shape[:2]
 
-            # 1. 口元・アゴの影・髭ノイズ完全消去 (コンシーラー)
+            # 1. 口元・アゴの影・髭ノイズ完全消去 (コンシーラー・強力版)
             if self.concealer_strength > 0:
-                jaw_y = int(h * 0.58)
+                jaw_y = int(h * 0.48)
                 jaw_roi = face_bgr_128[jaw_y:h, :]
                 
-                # 頬のベース肌色をサンプリング
-                cheek_roi = face_bgr_128[int(h*0.35):int(h*0.52), int(w*0.2):int(w*0.8)]
+                # 頬の明るい肌色ベースをサンプリング
+                cheek_roi = face_bgr_128[int(h*0.30):int(h*0.48), int(w*0.2):int(w*0.8)]
                 base_color = cheek_roi.mean(axis=(0, 1))
 
-                # 暗い影・黒ずみピクセルを検出し、陶器のような滑らかな肌色へブライトニング
                 gray_jaw = cv2.cvtColor(jaw_roi, cv2.COLOR_BGR2GRAY)
-                dark_shadows = (gray_jaw < base_color.mean() * 0.92).astype(np.float32)
+                dark_shadows = np.clip((base_color.mean() - gray_jaw) / (base_color.mean() * 0.4 + 1e-5), 0.0, 1.0)
                 dark_shadows = cv2.GaussianBlur(dark_shadows, (15, 15), 0)[:, :, np.newaxis]
 
-                smooth_jaw = cv2.bilateralFilter(jaw_roi, d=9, sigmaColor=75, sigmaSpace=75)
+                smooth_jaw = cv2.bilateralFilter(jaw_roi, d=9, sigmaColor=85, sigmaSpace=85)
+                brightened = cv2.addWeighted(smooth_jaw, 0.65, np.full_like(smooth_jaw, base_color, dtype=np.uint8), 0.35, 0)
+                
                 concealed_jaw = (jaw_roi.astype(np.float32) * (1.0 - dark_shadows * self.concealer_strength) + 
-                                 smooth_jaw.astype(np.float32) * (dark_shadows * self.concealer_strength)).astype(np.uint8)
+                                 brightened.astype(np.float32) * (dark_shadows * self.concealer_strength)).astype(np.uint8)
                 face_bgr_128[jaw_y:h, :] = concealed_jaw
 
             # 2. ふんわり血色チーク (両頬のほんのりピンク)
