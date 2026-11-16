@@ -606,13 +606,10 @@ class AIFaceSwapPipeline:
             self.simswap_source_name: converted_emb
         })[0][0]
 
-        # 6. 逆正規化 (512x512 BGR)
+        # 6. 逆正規化 (SimSwap 512px 正しいRGB [0.0〜1.0] デコード)
         pred_rgb = np.transpose(pred, (1, 2, 0))
-        if pred_rgb.min() < -0.1:
-            pred_rgb = np.clip((pred_rgb * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
-        else:
-            pred_rgb = np.clip(pred_rgb * 255.0, 0, 255).astype(np.uint8)
-        pred_bgr_512 = cv2.cvtColor(pred_rgb, cv2.COLOR_RGB2BGR)
+        pred_rgb = np.clip(pred_rgb, 0.0, 1.0)
+        pred_bgr_512 = (pred_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
 
         # 7. Reinhard LAB カラーマッチング (本人の肌色・明度・血色感に100%完全同化)
         pred_bgr_512 = apply_reinhard_color_transfer(pred_bgr_512, crop_img_512)
