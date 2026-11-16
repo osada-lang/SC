@@ -310,7 +310,7 @@ class AIFaceSwapPipeline:
 
     def _detect_hand_mask_solid(self, frame: np.ndarray) -> np.ndarray:
         """
-        MediaPipe骨格 ＋ 手のひら・指の肉厚完全面結合 (手の透けを物理的ゼロ化)
+        MediaPipe Hands 指1本ずつの完全ソリッド肉厚カプセル描画 (指の隙間抜け ＆ 透けゼロ化)
         """
         h, w = frame.shape[:2]
         if self.mp_hands is None:
@@ -330,21 +330,33 @@ class AIFaceSwapPipeline:
                 for lm in hand_landmarks.landmark:
                     px = int(lm.x * w)
                     py = int(lm.y * h)
-                    pts.append([px, py])
-                    cv2.circle(solid_mask, (px, py), int(w * 0.045), 255, -1)
-                
-                pts = np.array(pts, dtype=np.int32)
-                hull = cv2.convexHull(pts)
-                cv2.fillConvexPoly(solid_mask, hull, 255)
+                    pts.append((px, py))
 
-                connections = mp.solutions.hands.HAND_CONNECTIONS
-                for conn in connections:
-                    pt1 = pts[conn[0]]
-                    pt2 = pts[conn[1]]
-                    cv2.line(solid_mask, tuple(pt1), tuple(pt2), 255, thickness=int(w * 0.08))
+                # 1. 手のひら (Palm) の完全不透明ポリゴン
+                palm_indices = [0, 1, 2, 5, 9, 13, 17]
+                palm_pts = np.array([pts[i] for i in palm_indices], dtype=np.int32)
+                cv2.fillConvexPoly(solid_mask, cv2.convexHull(palm_pts), 255)
 
-            solid_mask = cv2.dilate(solid_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15)), iterations=2)
-            solid_mask_blur = cv2.GaussianBlur(solid_mask, (11, 11), 0)
+                # 2. 5本の指ごとの肉厚カプセル描画 (指の間は抜いて指本体を100%不透明化)
+                fingers = [
+                    [1, 2, 3, 4],       # 親指
+                    [5, 6, 7, 8],       # 人差し指
+                    [9, 10, 11, 12],    # 中指
+                    [13, 14, 15, 16],   # 薬指
+                    [17, 18, 19, 20]    # 小指
+                ]
+
+                finger_thickness = max(18, int(w * 0.065))
+                tip_radius = max(12, int(w * 0.040))
+
+                for finger in fingers:
+                    for i in range(len(finger) - 1):
+                        cv2.line(solid_mask, pts[finger[i]], pts[finger[i+1]], 255, thickness=finger_thickness)
+                    for idx in finger:
+                        cv2.circle(solid_mask, pts[idx], tip_radius, 255, -1)
+
+            # 3. 境界の微小フェザリング (半透明の透け漏れを防止)
+            solid_mask_blur = cv2.GaussianBlur(solid_mask, (7, 7), 0)
             return (solid_mask_blur / 255.0)[:, :, np.newaxis].astype(np.float32)
         except Exception:
             return np.zeros((h, w, 1), dtype=np.float32)
