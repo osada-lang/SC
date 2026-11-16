@@ -77,18 +77,51 @@ def apply_reinhard_color_transfer(swapped_crop: np.ndarray, original_crop: np.nd
 
 
 # =====================================================================
-# 統合AI顔交換パイプライン (カメレオンAI 完全同等 自然肌色版)
+# 3. AI入力前・髭テクスチャ完全消滅フィルター (Pre-Inswapper Stubble Cleanser)
 # =====================================================================
+def cleanse_pre_inswapper_stubble(crop_128: np.ndarray) -> np.ndarray:
+    """
+    AIに渡す直前のクロップ画像から、アゴ・鼻下・口周りの髭のざらつきや暗い影を完全に平滑化
+    これにより、Inswapperが髭を1ピクセルも生成しないツルツルの女性肌として認識する
+    """
+    try:
+        h, w = crop_128.shape[:2]
+        cleansed = crop_128.copy()
+
+        # 鼻の下〜アゴ周り領域 (h: 50%〜100%)
+        jaw_y1 = int(h * 0.50)
+        jaw_roi = cleansed[jaw_y1:h, :]
+
+        # 頬の健康的な肌色をサンプリング
+        cheek_roi = cleansed[int(h * 0.32):int(h * 0.48), int(w * 0.22):int(w * 0.78)]
+        base_color = cheek_roi.mean(axis=(0, 1))
+
+        # 髭や暗い影のテクスチャを強力に平滑化
+        bilateral_jaw = cv2.bilateralFilter(jaw_roi, d=11, sigmaColor=90, sigmaSpace=90)
+        
+        # 暗い髭ピクセルを肌色へブライトニング
+        gray_jaw = cv2.cvtColor(jaw_roi, cv2.COLOR_BGR2GRAY)
+        dark_mask = np.clip((base_color.mean() * 0.95 - gray_jaw) / (base_color.mean() * 0.35 + 1e-5), 0.0, 1.0)
+        dark_mask = cv2.GaussianBlur(dark_mask, (13, 13), 0)[:, :, np.newaxis]
+
+        # 影を持ち上げてツルツル肌へ置き換え
+        flattened_jaw = cv2.addWeighted(bilateral_jaw, 0.60, np.full_like(jaw_roi, base_color, dtype=np.uint8), 0.40, 0)
+        cleansed[jaw_y1:h, :] = (jaw_roi.astype(np.float32) * (1.0 - dark_mask * 0.90) +
+                                 flattened_jaw.astype(np.float32) * (dark_mask * 0.90)).astype(np.uint8)
+
+        return cleansed
+    except Exception:
+        return crop_128
 class AIFaceSwapPipeline:
     def __init__(self, models_dir="models", default_target_path=None):
         self.models_dir = models_dir
         self.providers = self._get_optimal_providers()
         print(f"[AI Pipeline Pro] 使用プロバイダー: {self.providers}")
 
-        # パラメータ設定 (白浮きゼロ・自然肌色デフォルト)
-        self.mix_ratio = 0.70          # 顔ミックス比率 (0.0〜1.0)
+        # パラメータ設定 (美形純度向上・白浮きゼロ・自然肌色デフォルト)
+        self.mix_ratio = 0.80          # 顔ミックス比率 (ターゲット造形美を80%キープ)
         self.enable_gfpgan = True      # GFPGAN超解像
-        self.gfpgan_weight = 0.65      # GFPGAN復元強度
+        self.gfpgan_weight = 0.70      # GFPGAN復元強度 (70%で目元クッキリ)
         self.enable_face_parser = True # 手の透け防止オクルージョンマスク (MediaPipe)
         self.exclude_mouth = True      # 口元・唇・歯の完全保護
         self.sharpness = 1.2           # シャープネス
@@ -436,8 +469,11 @@ class AIFaceSwapPipeline:
         # 2. クロップ (128x128)
         crop_img_128 = cv2.warpAffine(img, M128, (128, 128), borderMode=cv2.BORDER_REPLICATE)
         
-        # 3. Inswapper 推論
-        crop_rgb = cv2.cvtColor(crop_img_128, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        # 3. AI入力前・髭テクスチャ完全消滅フィルター (Inswapperが髭を生成しないよう前処理)
+        crop_ai_input = cleanse_pre_inswapper_stubble(crop_img_128.copy())
+
+        # 4. Inswapper 推論
+        crop_rgb = cv2.cvtColor(crop_ai_input, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         blob = np.transpose(crop_rgb, (2, 0, 1))[np.newaxis, ...]
 
         source_emb = latent_embedding.reshape(1, -1)
