@@ -32,6 +32,10 @@ const gfpganWeightVal = document.getElementById('gfpganWeightVal');
 const togglePoisson = document.getElementById('togglePoisson');
 const toggleFaceParser = document.getElementById('toggleFaceParser');
 const toggleExcludeMouth = document.getElementById('toggleExcludeMouth');
+const sliderConcealer = document.getElementById('sliderConcealer');
+const concealerVal = document.getElementById('concealerVal');
+const sliderBlush = document.getElementById('sliderBlush');
+const blushVal = document.getElementById('blushVal');
 const sliderBeautySmooth = document.getElementById('sliderBeautySmooth');
 const beautySmoothVal = document.getElementById('beautySmoothVal');
 const sliderBeautyWhitening = document.getElementById('sliderBeautyWhitening');
@@ -139,7 +143,9 @@ async function pushSettings() {
         sharpness: parseInt(sliderSharpness.value, 10) / 10.0,
         skin_blend: parseInt(sliderSkinBlend.value, 10) / 100.0,
         beauty_smooth: parseInt(sliderBeautySmooth.value, 10) / 100.0,
-        beauty_whitening: parseInt(sliderBeautyWhitening.value, 10) / 100.0
+        beauty_whitening: parseInt(sliderBeautyWhitening.value, 10) / 100.0,
+        concealer_strength: sliderConcealer ? parseInt(sliderConcealer.value, 10) / 100.0 : 0.70,
+        blush_tint: sliderBlush ? parseInt(sliderBlush.value, 10) / 100.0 : 0.25
       })
     });
   } catch (err) {
@@ -159,6 +165,18 @@ sliderGFPGANWeight.addEventListener('input', (e) => {
 if (togglePoisson) togglePoisson.addEventListener('change', pushSettings);
 toggleFaceParser.addEventListener('change', pushSettings);
 if (toggleExcludeMouth) toggleExcludeMouth.addEventListener('change', pushSettings);
+if (sliderConcealer) {
+  sliderConcealer.addEventListener('input', (e) => {
+    concealerVal.textContent = `${e.target.value}%`;
+    pushSettings();
+  });
+}
+if (sliderBlush) {
+  sliderBlush.addEventListener('input', (e) => {
+    blushVal.textContent = `${e.target.value}%`;
+    pushSettings();
+  });
+}
 sliderBeautySmooth.addEventListener('input', (e) => {
   beautySmoothVal.textContent = `${e.target.value}%`;
   pushSettings();

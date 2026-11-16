@@ -198,7 +198,10 @@ async def api_settings(settings: dict):
         sharpness=settings.get("sharpness"),
         skin_blend=settings.get("skin_blend"),
         beauty_smooth=settings.get("beauty_smooth"),
-        beauty_whitening=settings.get("beauty_whitening")
+        beauty_whitening=settings.get("beauty_whitening"),
+        concealer_strength=settings.get("concealer_strength"),
+        lip_tint=settings.get("lip_tint"),
+        blush_tint=settings.get("blush_tint")
     )
     return JSONResponse({"status": "ok", "current": pipeline.get_status()})
 

@@ -94,7 +94,10 @@ class AIFaceSwapPipeline:
         self.sharpness = 1.2           # シャープネス
         self.skin_blend = 0.15         # 元の顔馴染ませ率
         self.beauty_smooth = 0.50      # 美肌スムージング (陶器肌)
-        self.beauty_whitening = 0.00   # トーンアップ美白 (白浮き防止のためデフォルト0%)
+        self.beauty_whitening = 0.00   # トーンアップ美白
+        self.concealer_strength = 0.70 # 口元影・髭ノイズ消去コンシーラー (0.0〜1.0)
+        self.lip_tint = 0.35           # 血色リップグロス・ティント (0.0〜1.0)
+        self.blush_tint = 0.25         # ふんわり血色チーク (0.0〜1.0)
 
         # 動的アダプティブEMA追従フィルター
         self.prev_kps = None
@@ -200,7 +203,7 @@ class AIFaceSwapPipeline:
         self.current_target_face = target_face
         return True
 
-    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, gfpgan_weight=None, enable_face_parser=None, exclude_mouth=None, sharpness=None, skin_blend=None, beauty_smooth=None, beauty_whitening=None, **kwargs):
+    def set_parameters(self, mix_ratio=None, enable_gfpgan=None, gfpgan_weight=None, enable_face_parser=None, exclude_mouth=None, sharpness=None, skin_blend=None, beauty_smooth=None, beauty_whitening=None, concealer_strength=None, lip_tint=None, blush_tint=None, **kwargs):
         if mix_ratio is not None:
             self.mix_ratio = float(np.clip(mix_ratio, 0.0, 1.0))
         if enable_gfpgan is not None:
@@ -219,6 +222,12 @@ class AIFaceSwapPipeline:
             self.beauty_smooth = float(np.clip(beauty_smooth, 0.0, 1.0))
         if beauty_whitening is not None:
             self.beauty_whitening = float(np.clip(beauty_whitening, 0.0, 1.0))
+        if concealer_strength is not None:
+            self.concealer_strength = float(np.clip(concealer_strength, 0.0, 1.0))
+        if lip_tint is not None:
+            self.lip_tint = float(np.clip(lip_tint, 0.0, 1.0))
+        if blush_tint is not None:
+            self.blush_tint = float(np.clip(blush_tint, 0.0, 1.0))
 
     def get_status(self):
         return {
@@ -234,6 +243,9 @@ class AIFaceSwapPipeline:
             "skin_blend": self.skin_blend,
             "beauty_smooth": self.beauty_smooth,
             "beauty_whitening": self.beauty_whitening,
+            "concealer_strength": self.concealer_strength,
+            "lip_tint": self.lip_tint,
+            "blush_tint": self.blush_tint,
             "providers": self.providers
         }
 
@@ -265,6 +277,53 @@ class AIFaceSwapPipeline:
             gaussian = cv2.GaussianBlur(eye_roi, (0, 0), 1.0)
             sharp_eye = cv2.addWeighted(eye_roi, 1.35, gaussian, -0.35, 0)
             face_bgr_128[eye_y1:eye_y2, :] = sharp_eye
+            return face_bgr_128
+        except Exception:
+            return face_bgr_128
+
+    def _apply_female_beauty_suite(self, face_bgr_128: np.ndarray) -> np.ndarray:
+        """
+        女性配信者特化ビューティースイート:
+        1. 口元・アゴの影＆髭ノイズ完全除去 (デジタルコンシーラー)
+        2. ふんわり血色チーク (ほんのりピンク)
+        3. 血色リップティント
+        """
+        try:
+            h, w = face_bgr_128.shape[:2]
+
+            # 1. 口元・アゴの影・髭ノイズ完全消去 (コンシーラー)
+            if self.concealer_strength > 0:
+                jaw_y = int(h * 0.58)
+                jaw_roi = face_bgr_128[jaw_y:h, :]
+                
+                # 頬のベース肌色をサンプリング
+                cheek_roi = face_bgr_128[int(h*0.35):int(h*0.52), int(w*0.2):int(w*0.8)]
+                base_color = cheek_roi.mean(axis=(0, 1))
+
+                # 暗い影・黒ずみピクセルを検出し、陶器のような滑らかな肌色へブライトニング
+                gray_jaw = cv2.cvtColor(jaw_roi, cv2.COLOR_BGR2GRAY)
+                dark_shadows = (gray_jaw < base_color.mean() * 0.92).astype(np.float32)
+                dark_shadows = cv2.GaussianBlur(dark_shadows, (15, 15), 0)[:, :, np.newaxis]
+
+                smooth_jaw = cv2.bilateralFilter(jaw_roi, d=9, sigmaColor=75, sigmaSpace=75)
+                concealed_jaw = (jaw_roi.astype(np.float32) * (1.0 - dark_shadows * self.concealer_strength) + 
+                                 smooth_jaw.astype(np.float32) * (dark_shadows * self.concealer_strength)).astype(np.uint8)
+                face_bgr_128[jaw_y:h, :] = concealed_jaw
+
+            # 2. ふんわり血色チーク (両頬のほんのりピンク)
+            if self.blush_tint > 0:
+                blush_mask = np.zeros((h, w), dtype=np.float32)
+                cv2.circle(blush_mask, (int(w * 0.28), int(h * 0.52)), int(w * 0.14), 1.0, -1)
+                cv2.circle(blush_mask, (int(w * 0.72), int(h * 0.52)), int(w * 0.14), 1.0, -1)
+                blush_mask = cv2.GaussianBlur(blush_mask, (21, 21), 0)[:, :, np.newaxis]
+
+                blush_color = np.array([140, 130, 220], dtype=np.float32)
+                face_bgr_128 = np.clip(
+                    face_bgr_128.astype(np.float32) * (1.0 - blush_mask * self.blush_tint * 0.45) +
+                    blush_color * (blush_mask * self.blush_tint * 0.45),
+                    0, 255
+                ).astype(np.uint8)
+
             return face_bgr_128
         except Exception:
             return face_bgr_128
@@ -411,13 +470,16 @@ class AIFaceSwapPipeline:
             smoothed = cv2.bilateralFilter(pred_bgr, d=7, sigmaColor=30, sigmaSpace=30)
             pred_bgr = cv2.addWeighted(pred_bgr, 1.0 - self.beauty_smooth * 0.5, smoothed, self.beauty_smooth * 0.5, 0)
 
-        # 8. トーンアップ美白 (白浮きを防ぐ微細調整)
+        # 8. 女性配信者特化ビューティースイート (口元影・髭消しコンシーラー ＆ 血色チーク)
+        pred_bgr = self._apply_female_beauty_suite(pred_bgr)
+
+        # 9. トーンアップ美白 (白浮きを防ぐ微細調整)
         if self.beauty_whitening > 0:
             hsv = cv2.cvtColor(pred_bgr, cv2.COLOR_BGR2HSV).astype(np.float32)
             hsv[:, :, 2] = np.clip(hsv[:, :, 2] * (1.0 + self.beauty_whitening * 0.10), 0, 255)
             pred_bgr = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
-        # 9. シャープネス強調
+        # 10. シャープネス強調
         if self.sharpness > 1.0:
             gaussian = cv2.GaussianBlur(pred_bgr, (0, 0), 1.5)
             pred_bgr = cv2.addWeighted(pred_bgr, self.sharpness, gaussian, 1.0 - self.sharpness, 0)
