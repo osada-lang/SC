@@ -3,6 +3,7 @@ import sys
 import time
 import cv2
 import numpy as np
+import scipy.spatial.transform
 import onnxruntime as ort
 import insightface
 from insightface.app import FaceAnalysis
@@ -15,7 +16,7 @@ except ImportError:
     HAS_MEDIAPIPE = False
 
 # =====================================================================
-# ArcFace 基準ランドマーク (Inswapper 128px & SimSwap 512px)
+# ArcFace 基準ランドマーク (Inswapper 128px, Ghost 256px, LivePortrait 512px)
 # =====================================================================
 ARCFACE_DST_128 = np.array([
     [38.2946, 51.6963],
@@ -177,7 +178,27 @@ class AIFaceSwapPipeline:
         except Exception as e:
             print(f"[AI Pipeline Pro] emap 抽出警告: {e}")
 
-        # 3. Ghost 256 (カメレオンAI同系列 本命モデル) & ArcFace Converter
+        # 3. LivePortrait 3D表情駆動本格エンジン (ステップB)
+        lp_feat_path = os.path.join(models_dir, "live_portrait_feature_extractor.onnx")
+        lp_mot_path = os.path.join(models_dir, "live_portrait_motion_extractor.onnx")
+        lp_gen_path = os.path.join(models_dir, "live_portrait_generator.onnx")
+        self.use_live_portrait = False
+        self.lp_feat_session = None
+        self.lp_mot_session = None
+        self.lp_gen_session = None
+
+        if os.path.exists(lp_feat_path) and os.path.exists(lp_mot_path) and os.path.exists(lp_gen_path):
+            try:
+                print("[AI Pipeline Pro] LivePortrait 3D立体表情駆動エンジンを初期化中...")
+                self.lp_feat_session = ort.InferenceSession(lp_feat_path, providers=self.providers, sess_options=sess_opts)
+                self.lp_mot_session = ort.InferenceSession(lp_mot_path, providers=self.providers, sess_options=sess_opts)
+                self.lp_gen_session = ort.InferenceSession(lp_gen_path, providers=self.providers, sess_options=sess_opts)
+                self.use_live_portrait = True
+                print("🚀 [AI Pipeline Pro] LivePortrait 3D立体表情駆動本格エンジンスワップ完了！")
+            except Exception as e:
+                print(f"[AI Pipeline Pro] LivePortrait 初期化警告: {e}")
+
+        # 4. Ghost 256 (カメレオンAI同系列 本命モデル) & ArcFace Converter
         ghost_path = os.path.join(models_dir, "ghost_2_256.onnx")
         converter_path = os.path.join(models_dir, "arcface_converter_ghost.onnx")
         self.use_ghost = False
@@ -255,11 +276,41 @@ class AIFaceSwapPipeline:
 
         target_face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
         
-        self.targets[target_id] = {
+        target_dict = {
             "image_path": image_path,
             "face": target_face,
-            "embedding": target_face.normed_embedding.copy()
+            "embedding": target_face.normed_embedding.copy(),
+            "lp_feature_volume": None,
+            "lp_target_motion_points": None
         }
+
+        # LivePortrait 3Dモデル用キャッシュ事前計算 (1回だけ計算して爆速化)
+        if self.use_live_portrait and self.lp_feat_session is not None:
+            try:
+                M512, _ = cv2.estimateAffinePartial2D(target_face.kps, ARCFACE_DST_512)
+                if M512 is not None:
+                    crop_512 = cv2.warpAffine(img, M512, (512, 512), borderMode=cv2.BORDER_REPLICATE)
+                    crop_rgb = cv2.cvtColor(crop_512, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                    crop_blob = np.transpose(crop_rgb, (2, 0, 1))[np.newaxis, ...]
+
+                    # 1. Feature Volume 抽出
+                    feat_input_name = self.lp_feat_session.get_inputs()[0].name
+                    feat_volume = self.lp_feat_session.run(None, {feat_input_name: crop_blob})[0]
+                    target_dict["lp_feature_volume"] = feat_volume
+
+                    # 2. ターゲットの基準モーション抽出
+                    mot_input_name = self.lp_mot_session.get_inputs()[0].name
+                    mot_out = self.lp_mot_session.run(None, {mot_input_name: crop_blob})
+                    pitch, yaw, roll, scale, translation, expression, motion_points = mot_out[:7]
+
+                    rot = scipy.spatial.transform.Rotation.from_euler('xyz', [float(pitch[0][0]), float(yaw[0][0]), float(roll[0][0])], degrees=True).as_matrix().astype(np.float32)
+                    target_motion_points = scale * (motion_points @ rot.T + expression) + translation
+                    target_dict["lp_target_motion_points"] = target_motion_points
+                    print(f"✓ [LivePortrait] ターゲット「{target_id}」の3D立体特徴量キャッシュ完了！")
+            except Exception as e:
+                print(f"[LivePortrait] ターゲット特徴量抽出警告: {e}")
+
+        self.targets[target_id] = target_dict
         self.current_target_id = target_id
         self.current_target_face = target_face
         return True
@@ -307,7 +358,11 @@ class AIFaceSwapPipeline:
             "concealer_strength": self.concealer_strength,
             "lip_tint": self.lip_tint,
             "blush_tint": self.blush_tint,
-            "active_engine": "Ghost 256 (カメレオンAI同系列モデル)" if self.use_ghost else "Inswapper 128",
+            "active_engine": (
+                "LivePortrait 3D (立体表情駆動本格エンジン)" if self.use_live_portrait else (
+                    "Ghost 256 (カメレオンAI同系列モデル)" if self.use_ghost else "Inswapper 128"
+                )
+            ),
             "providers": self.providers
         }
 
@@ -649,6 +704,81 @@ class AIFaceSwapPipeline:
         result = (img.astype(np.float32) * (1.0 - final_parts_mask) + warped_swapped.astype(np.float32) * final_parts_mask).astype(np.uint8)
         return result
 
+    def _drive_live_portrait_3d(self, img: np.ndarray, face, target_data: dict) -> np.ndarray:
+        """
+        LivePortrait 3D立体表情駆動エンジン (ステップB 本格3D)
+        見本写真を3D空間でリアルタイムに表情駆動させ、首の角度や笑顔に立体同期
+        """
+        kps = face.kps
+        if self.prev_kps is not None:
+            velocity = np.linalg.norm(kps - self.prev_kps)
+            alpha = np.clip(0.65 + (velocity / 20.0) * 0.30, 0.65, 0.95)
+            kps = self.prev_kps * (1.0 - alpha) + kps * alpha
+        self.prev_kps = kps
+
+        # 1. 512px 基準アライメント行列
+        M512, _ = cv2.estimateAffinePartial2D(kps, ARCFACE_DST_512)
+        if M512 is None:
+            return img
+
+        # 2. カメラ顔のクロップ (512x512)
+        crop_img_512 = cv2.warpAffine(img, M512, (512, 512), borderMode=cv2.BORDER_REPLICATE)
+        crop_rgb = cv2.cvtColor(crop_img_512, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        crop_blob = np.transpose(crop_rgb, (2, 0, 1))[np.newaxis, ...]
+
+        # 3. カメラの3D頭部姿勢・表情モーション抽出
+        mot_input_name = self.lp_mot_session.get_inputs()[0].name
+        mot_out = self.lp_mot_session.run(None, {mot_input_name: crop_blob})
+        pitch, yaw, roll, scale, translation, expression, motion_points = mot_out[:7]
+
+        # 4. 3D回転行列の生成
+        rot = scipy.spatial.transform.Rotation.from_euler(
+            'xyz', [float(pitch[0][0]), float(yaw[0][0]), float(roll[0][0])], degrees=True
+        ).as_matrix().astype(np.float32)
+        source_motion_points = scale * (motion_points @ rot.T + expression) + translation
+
+        # 5. ターゲットのキャッシュデータ取得
+        feat_volume = target_data.get("lp_feature_volume")
+        target_motion_points = target_data.get("lp_target_motion_points")
+
+        # 6. LivePortrait 3D Generator 推論
+        gen_inputs = self.lp_gen_session.get_inputs()
+        gen_out = self.lp_gen_session.run(None, {
+            gen_inputs[0].name: feat_volume,
+            gen_inputs[1].name: source_motion_points,
+            gen_inputs[2].name: target_motion_points
+        })[0][0]
+
+        # 7. 逆正規化 (512x512 BGR)
+        pred_rgb = (np.transpose(gen_out, (1, 2, 0))).clip(0, 1)
+        pred_bgr_512 = (pred_rgb[:, :, ::-1] * 255.0).astype(np.uint8)
+
+        # 8. 地肌同調カラーマッチング & 美肌
+        pred_bgr_512 = apply_reinhard_color_transfer(pred_bgr_512, crop_img_512)
+
+        if self.beauty_smooth > 0:
+            smoothed = cv2.bilateralFilter(pred_bgr_512, d=7, sigmaColor=30, sigmaSpace=30)
+            pred_bgr_512 = cv2.addWeighted(pred_bgr_512, 1.0 - self.beauty_smooth * 0.4, smoothed, self.beauty_smooth * 0.4, 0)
+
+        # 9. 逆アフィン変換で元画像空間へ展開 (512px高解像度逆変換)
+        IM512 = cv2.invertAffineTransform(M512)
+        h, w = img.shape[:2]
+
+        crop_valid_mask = np.zeros((512, 512), dtype=np.float32)
+        cv2.circle(crop_valid_mask, (256, 256), 235, 1.0, -1)
+        crop_valid_mask = cv2.GaussianBlur(crop_valid_mask, (25, 25), 0)
+
+        warped_swapped = cv2.warpAffine(pred_bgr_512, IM512, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_valid = cv2.warpAffine(crop_valid_mask, IM512, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        warped_valid = np.expand_dims(warped_valid, axis=-1)
+
+        # 10. パーツマスク生成 (口元除外を含む)
+        parts_mask = self._create_full_parts_mask(img.shape, face, kps)
+        final_parts_mask = parts_mask * warped_valid
+
+        result = (img.astype(np.float32) * (1.0 - final_parts_mask) + warped_swapped.astype(np.float32) * final_parts_mask).astype(np.uint8)
+        return result
+
     def process_frame(self, frame: np.ndarray) -> tuple[np.ndarray, dict]:
         start_time = time.time()
         
@@ -660,6 +790,7 @@ class AIFaceSwapPipeline:
             swapped_frame = frame.copy()
             
             if len(faces) > 0:
+                target_data = self.targets.get(self.current_target_id, {})
                 for face in faces:
                     target_emb = self.current_target_face.normed_embedding
                     source_emb = face.normed_embedding
@@ -667,8 +798,10 @@ class AIFaceSwapPipeline:
                     # SLERP による真の潜在モーフィング
                     blended_emb = slerp_vectors(source_emb, target_emb, self.mix_ratio)
 
-                    # Ghost 256 または Inswapper 128 による顔交換
-                    if self.use_ghost and self.ghost_session is not None:
+                    # LivePortrait 3D、Ghost 256、または Inswapper 128
+                    if self.use_live_portrait and self.lp_gen_session is not None and target_data.get("lp_feature_volume") is not None:
+                        swapped_frame = self._drive_live_portrait_3d(swapped_frame, face, target_data)
+                    elif self.use_ghost and self.ghost_session is not None:
                         swapped_frame = self._swap_face_ghost_256(swapped_frame, face, blended_emb)
                     else:
                         swapped_frame = self._swap_face_direct(swapped_frame, face, blended_emb)
